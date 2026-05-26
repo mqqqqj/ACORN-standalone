@@ -1,0 +1,30 @@
+# Build
+build/
+cmake-build-*/
+
+# Compiled output
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Data / index files
+*.ibin
+*.index
+*.fbin
+
+# Documents
+*.pdf
+
+# Debug logs
+*.log
