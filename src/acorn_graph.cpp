@@ -1,6 +1,7 @@
 // -*- c++ -*-
 #include "acorn/acorn_graph.h"
 
+#include <algorithm>
 #include <string>
 #include <sys/time.h>
 #include <stdio.h>
@@ -1048,6 +1049,204 @@ ACORNStats ACORN::search(
         }
     }
 
+    return stats;
+}
+
+ACORNStats ACORN::parallel_search(
+        DistanceComputer& qdis,
+        int k,
+        idx_t* I,
+        float* D,
+        VisitedTable& vt,
+        int num_threads,
+        int efs,
+        const SearchParametersACORN* params) const {
+
+    ACORNStats stats;
+    if (entry_point == -1) return stats;
+
+    if (num_threads <= 1) {
+        return search(qdis, k, I, D, vt, params);
+    }
+
+    // Phase 1: Serial greedy descent on upper levels
+    storage_idx_t nearest = entry_point;
+    float d_nearest = qdis(nearest);
+    stats.ndis++;
+
+    for (int level = max_level; level >= 1; level--) {
+        greedy_update_nearest(*this, qdis, level, nearest, d_nearest);
+    }
+
+    // Phase 2: One serial step — expand entry point at level 0
+    vt.set(nearest);
+
+    std::vector<float> shared_D(k, std::numeric_limits<float>::max());
+    std::vector<idx_t> shared_I(k, -1);
+    int shared_nres = 1;
+    shared_D[0] = d_nearest;
+    shared_I[0] = nearest;
+
+    std::vector<std::pair<float, storage_idx_t>> batch;
+    {
+        size_t begin, end;
+        neighbor_range(nearest, 0, &begin, &end);
+        for (size_t j = begin; j < end; j++) {
+            auto v = neighbors[j];
+            if (v < 0) break;
+            if (vt.get(v)) continue;
+            vt.set(v);
+            float d = qdis(v);
+            stats.ndis++;
+            batch.emplace_back(d, v);
+        }
+    }
+    // Add initial batch to shared results
+    for (auto& p : batch) {
+        if (shared_nres < k) {
+            maxheap_push(++shared_nres, shared_D.data(), shared_I.data(), p.first, p.second);
+        } else if (p.first < shared_D[0]) {
+            maxheap_replace_top(k, shared_D.data(), shared_I.data(), p.first, p.second);
+        }
+    }
+
+    bool do_dis_check = params ? params->check_relative_distance : check_relative_distance;
+
+    // Phase 3: Parallel search rounds
+    while (!batch.empty()) {
+        int to_process = std::min(num_threads * efs, (int)batch.size());
+        int per_thread = (to_process + num_threads - 1) / num_threads;
+
+        std::vector<std::vector<std::pair<float, storage_idx_t>>> thread_unexpanded(num_threads);
+
+#pragma omp parallel num_threads(num_threads)
+        {
+            int tid = omp_get_thread_num();
+            int ndis_local = 0;
+
+            MinimaxHeap local_queue(efs);
+            std::vector<float> local_D(k, std::numeric_limits<float>::max());
+            std::vector<idx_t> local_I(k, -1);
+            int local_nres = 0;
+
+            // Distribute batch slice to this thread
+            int start = tid * per_thread;
+            int end = std::min(start + per_thread, to_process);
+            for (int i = start; i < end; i++) {
+                auto& p = batch[i];
+                local_queue.push(p.second, p.first);
+                if (local_nres < k) {
+                    maxheap_push(++local_nres, local_D.data(), local_I.data(), p.first, p.second);
+                } else if (p.first < local_D[0]) {
+                    maxheap_replace_top(k, local_D.data(), local_I.data(), p.first, p.second);
+                }
+            }
+
+            // Independent search for up to efs steps
+            for (int step = 0; step < efs; step++) {
+                float d0;
+                int v0 = local_queue.pop_min(&d0);
+                if (v0 == -1) break;
+
+                if (do_dis_check) {
+                    if (local_queue.count_below(d0) >= efs) break;
+                }
+
+                size_t nb_begin, nb_end;
+                neighbor_range(v0, 0, &nb_begin, &nb_end);
+                for (size_t j = nb_begin; j < nb_end; j++) {
+                    auto v = neighbors[j];
+                    if (v < 0) break;
+                    if (vt.get(v)) continue;
+                    vt.set(v);
+
+                    float d = qdis(v);
+                    ndis_local++;
+
+                    local_queue.push(v, d);
+                    if (local_nres < k) {
+                        maxheap_push(++local_nres, local_D.data(), local_I.data(), d, v);
+                    } else if (d < local_D[0]) {
+                        maxheap_replace_top(k, local_D.data(), local_I.data(), d, v);
+                    }
+                }
+            }
+
+            // Collect unexpanded vertices from local queue
+            thread_unexpanded[tid].clear();
+            for (int i = 0; i < local_queue.k; i++) {
+                if (local_queue.ids[i] != -1) {
+                    thread_unexpanded[tid].emplace_back(
+                        local_queue.dis[i], local_queue.ids[i]);
+                }
+            }
+
+            // Accumulate ndis
+#pragma omp atomic
+            stats.ndis += ndis_local;
+
+            // Merge local results into shared
+#pragma omp critical
+            {
+                for (int i = 0; i < local_nres; i++) {
+                    if (local_I[i] < 0) continue;
+                    float d = local_D[i];
+                    idx_t id = local_I[i];
+                    if (shared_nres < k) {
+                        maxheap_push(++shared_nres, shared_D.data(), shared_I.data(), d, id);
+                    } else if (d < shared_D[0]) {
+                        maxheap_replace_top(k, shared_D.data(), shared_I.data(), d, id);
+                    }
+                }
+            }
+        }
+
+        // Remove processed chunk, keep overflow
+        batch.erase(batch.begin(), batch.begin() + to_process);
+
+        // Collect all unexpanded vertices from all threads, keep only top-efs
+        std::vector<std::pair<float, storage_idx_t>> all_unexpanded;
+        for (int t = 0; t < num_threads; t++) {
+            for (auto& p : thread_unexpanded[t]) {
+                all_unexpanded.push_back(p);
+            }
+        }
+
+        if (!all_unexpanded.empty()) {
+            // Sort by distance ascending, keep top-efs
+            if ((int)all_unexpanded.size() > efs) {
+                std::nth_element(all_unexpanded.begin(),
+                                 all_unexpanded.begin() + efs,
+                                 all_unexpanded.end());
+                all_unexpanded.resize(efs);
+            }
+            for (auto& p : all_unexpanded) {
+                batch.push_back(p);
+            }
+        }
+
+        // Convergence: all remaining candidates are farther than current worst result
+        if (shared_nres >= k && !batch.empty()) {
+            float min_d = batch[0].first;
+            for (auto& p : batch) {
+                if (p.first < min_d) min_d = p.first;
+            }
+            if (min_d > shared_D[0]) {
+                batch.clear();
+            }
+        }
+    }
+
+    // Copy shared results to output
+    memcpy(D, shared_D.data(), shared_nres * sizeof(float));
+    memcpy(I, shared_I.data(), shared_nres * sizeof(idx_t));
+    size_t nel = maxheap_reorder(shared_nres, D, I);
+    for (size_t i = nel; i < (size_t)k; i++) {
+        D[i] = std::numeric_limits<float>::max();
+        I[i] = -1;
+    }
+
+    vt.advance();
     return stats;
 }
 

@@ -55,6 +55,9 @@ target_link_libraries(gen_labels acorn)
 add_executable(compute_groundtruth examples/compute_groundtruth.cpp)
 target_link_libraries(compute_groundtruth acorn)
 
+add_executable(test_parallel examples/test_parallel.cpp)
+target_link_libraries(test_parallel acorn)
+
 # Optionally build tests
 option(BUILD_TESTS "Build tests" OFF)
 if(BUILD_TESTS)

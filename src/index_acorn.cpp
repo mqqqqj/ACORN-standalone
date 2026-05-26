@@ -321,6 +321,58 @@ void IndexACORN::search(
     acorn_stats.combine({n1, n2, n3, ndis, nreorder});
 }
 
+void IndexACORN::parallelSearch(
+        idx_t n,
+        const float* x,
+        idx_t k,
+        float* distances,
+        idx_t* labels,
+        int num_threads,
+        int efs,
+        const SearchParameters* params_in) const {
+
+    ACORN_THROW_IF_NOT(k > 0);
+    ACORN_THROW_IF_NOT_MSG(storage,
+            "Please use IndexACORNFlat (or variants) instead of IndexACORN directly");
+
+    const SearchParametersACORN* params = nullptr;
+    if (params_in) {
+        params = dynamic_cast<const SearchParametersACORN*>(params_in);
+        ACORN_THROW_IF_NOT_MSG(params, "params type invalid");
+    }
+
+    size_t n1 = 0, n2 = 0, n3 = 0, ndis = 0, nreorder = 0;
+
+    for (idx_t i = 0; i < n; i++) {
+        VisitedTable vt(ntotal);
+
+        DistanceComputer* dis = storage_distance_computer(storage);
+        ScopeDeleter1<DistanceComputer> del(dis);
+
+        idx_t* idxi = labels + i * k;
+        float* simi = distances + i * k;
+        dis->set_query(x + i * d);
+
+        maxheap_heapify(k, simi, idxi);
+        ACORNStats stats = acorn.parallel_search(*dis, k, idxi, simi, vt,
+                                                  num_threads, efs, params);
+        n1 += stats.n1;
+        n2 += stats.n2;
+        n3 += stats.n3;
+        ndis += stats.ndis;
+        nreorder += stats.nreorder;
+        maxheap_reorder(k, simi, idxi);
+    }
+
+    if (metric_type == METRIC_INNER_PRODUCT) {
+        for (size_t i = 0; i < k * n; i++) {
+            distances[i] = -distances[i];
+        }
+    }
+
+    acorn_stats.combine({n1, n2, n3, ndis, nreorder});
+}
+
 void IndexACORN::add(idx_t n, const float* x) {
     ACORN_THROW_IF_NOT_MSG(storage,
             "Please use IndexACORNFlat (or variants) instead of IndexACORN directly");

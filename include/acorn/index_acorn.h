@@ -59,6 +59,17 @@ struct IndexACORN : Index {
             char* filter_id_map,
             const SearchParameters* params = nullptr) const;
 
+    /// intra-query parallel search (simplified iQAN)
+    void parallelSearch(
+            idx_t n,
+            const float* x,
+            idx_t k,
+            float* distances,
+            idx_t* labels,
+            int num_threads,
+            int efs,
+            const SearchParameters* params = nullptr) const;
+
     void reconstruct(idx_t key, float* recons) const override;
     void reset() override;
 

@@ -46,6 +46,13 @@ struct ACORN {
         void clear();
         int pop_min(float* vmin_out = nullptr);
         int count_below(float thresh);
+
+        /// Collect all valid (non -1) entries for redistribution
+        void collect_valid(std::vector<std::pair<float, storage_idx_t>>& out) const {
+            for (int i = 0; i < k; i++) {
+                if (ids[i] != -1) out.emplace_back(dis[i], ids[i]);
+            }
+        }
     };
 
     /// for sorting (distance, id) pairs
@@ -132,6 +139,17 @@ struct ACORN {
             idx_t* I,
             float* D,
             VisitedTable& vt,
+            const SearchParametersACORN* params = nullptr) const;
+
+    /// parallel iQAN-style search with shared visited list (lock-free)
+    ACORNStats parallel_search(
+            DistanceComputer& qdis,
+            int k,
+            idx_t* I,
+            float* D,
+            VisitedTable& vt,
+            int num_threads,
+            int efs,
             const SearchParametersACORN* params = nullptr) const;
 
     /// hybrid search with attribute filter

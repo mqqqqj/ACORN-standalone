@@ -1,6 +1,6 @@
 # ACORN-standalone: Approximate Nearest Neighbor Search with Attribute Filters
 
-> **ACORN** was originally implemented as part of the [FAISS](https://github.com/facebookresearch/faiss) vector search library. This repository extracts the ACORN index into a **standalone** C++ library with no dependency on FAISS, making it easier to understand, modify, and benchmark the ACORN algorithm in isolation.
+> **ACORN** was originally proposed by the [guestrin-lab/ACORN](https://github.com/guestrin-lab/ACORN) project and implemented as part of the [FAISS](https://github.com/facebookresearch/faiss) vector search library. This repository extracts the ACORN index into a **standalone** C++ library with no dependency on FAISS, making it easier to understand, modify, and benchmark the ACORN algorithm in isolation.
 
 ACORN is a high-performance C++ library for approximate nearest neighbor (ANN) search over large-scale vector datasets. It builds a graph-based proximity index and supports **hybrid search** — filtering results by discrete attribute values during the ANN traversal itself, rather than as a post-processing step.
 
