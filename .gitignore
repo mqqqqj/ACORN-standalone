@@ -1,5 +1,6 @@
 # Build
 build/
+data/
 cmake-build-*/
 
 # Compiled output
@@ -18,13 +19,5 @@ cmake-build-*/
 # macOS
 .DS_Store
 
-# Data / index files
-*.ibin
-*.index
-*.fbin
-
-# Documents
+# PDF
 *.pdf
-
-# Debug logs
-*.log

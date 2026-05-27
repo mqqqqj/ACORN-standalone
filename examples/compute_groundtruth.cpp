@@ -47,7 +47,7 @@ void brute_force_l2(
 int main(int argc, char* argv[]) {
     const char* base_file = "/dataset/SIFT1M/sift_base.fbin";
     const char* query_file = "/dataset/SIFT1M/sift_query.fbin";
-    const char* output_file = "groundtruth.ibin";
+    const char* output_file = "../data/groundtruth.ibin";
     int k = 100;
     int num_queries = -1;
 

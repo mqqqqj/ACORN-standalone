@@ -8,7 +8,7 @@
 
 int main(int argc, char* argv[]) {
     const char* base_file = "/dataset/SIFT1M/sift_base.fbin";
-    const char* output_file = "labels.ibin";
+    const char* output_file = "../data/labels.ibin";
     int seed = 42;
 
     for (int i = 1; i < argc; i++) {

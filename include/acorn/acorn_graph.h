@@ -141,13 +141,25 @@ struct ACORN {
             VisitedTable& vt,
             const SearchParametersACORN* params = nullptr) const;
 
-    /// parallel iQAN-style search with shared visited list (lock-free)
+    /// parallel iQAN-style search (no filter)
     ACORNStats parallel_search(
             DistanceComputer& qdis,
             int k,
             idx_t* I,
             float* D,
             VisitedTable& vt,
+            int num_threads,
+            int efs,
+            const SearchParametersACORN* params = nullptr) const;
+
+    /// parallel iQAN-style search with attribute filter
+    ACORNStats parallel_hybrid_search(
+            DistanceComputer& qdis,
+            int k,
+            idx_t* I,
+            float* D,
+            VisitedTable& vt,
+            char* filter_map,
             int num_threads,
             int efs,
             const SearchParametersACORN* params = nullptr) const;

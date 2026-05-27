@@ -145,20 +145,32 @@ int main(int argc, char* argv[]) {
     index.add(n, xb.data());
     printf("Index built. ntotal=%ld\n", index.ntotal);
 
-    // Search
-    printf("\nRunning search (%d queries, k=%d)...\n", nq, k);
+    // Pick a random query label for filtering
+    int filter_val = metadata[rng_meta() % n];
+
+    // Search with filter
+    printf("\nRunning filtered search (%d queries, k=%d, filter=attr==%d)...\n",
+           nq, k, filter_val);
     std::vector<acorn::idx_t> labels(k * nq);
     std::vector<float> distances(k * nq);
+
+    std::vector<char> filter_map(n, 0);
+    for (int i = 0; i < n; i++) {
+        if (metadata[i] == filter_val) filter_map[i] = 1;
+    }
+
     {
         acorn::SearchParametersACORN params;
         params.efSearch = ef;
-        index.search(nq, queries.data(), k, distances.data(), labels.data(), &params);
+        index.search(nq, queries.data(), k, distances.data(), labels.data(),
+                     filter_map.data(), &params);
     }
 
     printf("\nTop-5 results for query 0:\n");
     for (int j = 0; j < 5 && j < k; j++) {
         printf("  %2d: id=%6ld  dist=%.4f  attr=%d\n",
-               j, labels[j], distances[j], metadata[labels[j]]);
+               j, labels[j], distances[j],
+               labels[j] >= 0 ? metadata[labels[j]] : -1);
     }
 
     printf("\nSearch stats:\n");

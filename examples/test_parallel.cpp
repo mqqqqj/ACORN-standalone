@@ -39,20 +39,19 @@ static double compute_recall(int nq, int k, const std::vector<int> &gt_ids,
 int main(int argc, char *argv[])
 {
     const char *query_file = "/dataset/SIFT1M/sift_query.fbin";
-    const char *label_file = "labels.ibin";
-    const char *gt_file = "sift1m_gt_top100.ibin";
-    const char *index_file = "acorn_sift1m.index";
+    const char *label_file = "../data/labels.ibin";
+    const char *qlabel_file = "../data/query_labels.ibin";
+    const char *gt_file = "../data/sift1m_gt_filtered.ibin";
+    const char *index_file = "../data/acorn_sift1m.index";
     int k = 100;
-    int ef = 256;
+    int ef = 200;
     int num_threads = 2;
-    int num_queries = 10000;
-    int efs = 128;
+    int num_queries = 1000;
+    int efs = 100;
 
     for (int i = 1; i < argc; i++)
     {
-        if (strcmp(argv[i], "--query") == 0 && i + 1 < argc)
-            query_file = argv[++i];
-        else if (strcmp(argv[i], "--ef") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--ef") == 0 && i + 1 < argc)
             ef = atoi(argv[++i]);
         else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc)
             num_threads = atoi(argv[++i]);
@@ -60,17 +59,21 @@ int main(int argc, char *argv[])
             num_queries = atoi(argv[++i]);
         else if (strcmp(argv[i], "--efs") == 0 && i + 1 < argc)
             efs = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--k") == 0 && i + 1 < argc)
+            k = atoi(argv[++i]);
     }
 
-    printf("=== ACORN Serial vs Parallel Search Test ===\n");
-    printf("ef=%d, threads=%d, efs=%d, nq=%d\n\n", ef, num_threads, efs, num_queries);
+    printf("=== ACORN Filtered Search Test ===\n");
+    printf("ef=%d, threads=%d, efs=%d, nq=%d, k=%d\n\n",
+           ef, num_threads, efs, num_queries, k);
 
     // Load index
     printf("Loading index from %s ...\n", index_file);
     double t0 = get_ms();
     acorn::IndexACORN index;
     index.load(index_file);
-    printf("  ntotal=%ld, d=%d, M=%d (%.0f ms)\n", index.ntotal, index.d, index.acorn.M, get_ms() - t0);
+    printf("  ntotal=%ld, d=%d, M=%d (%.0f ms)\n",
+           index.ntotal, index.d, index.acorn.M, get_ms() - t0);
 
     // Load queries
     printf("Loading queries from %s ...\n", query_file);
@@ -79,17 +82,21 @@ int main(int argc, char *argv[])
     std::vector<float> queries = std::move(qr.first);
     int nq_all = qr.second.first, qd = qr.second.second;
     printf("  nq=%d, d=%d (%.0f ms)\n", nq_all, qd, get_ms() - t0);
-
-    if (num_queries > nq_all)
+    if (num_queries <= 0 || num_queries > nq_all)
         num_queries = nq_all;
 
-    // Load labels (needed for index metadata matching)
-    printf("Loading labels from %s ...\n", label_file);
-    std::vector<int> metadata = acorn::read_ibin(label_file, index.ntotal);
-    printf("  %zu labels loaded\n", metadata.size());
+    // Load base labels
+    printf("Loading base labels from %s ...\n", label_file);
+    std::vector<int> base_labels = acorn::read_ibin(label_file, index.ntotal);
+    printf("  %zu labels loaded\n", base_labels.size());
 
-    // Load groundtruth
-    printf("Loading groundtruth from %s ...\n", gt_file);
+    // Load query labels
+    printf("Loading query labels from %s ...\n", qlabel_file);
+    std::vector<int> query_labels = acorn::read_ibin(qlabel_file, nq_all);
+    printf("  %zu labels loaded\n", query_labels.size());
+
+    // Load filtered GT
+    printf("Loading filtered GT from %s ...\n", gt_file);
     auto gt_result = acorn::read_groundtruth(gt_file);
     std::vector<int> gt_ids = std::move(gt_result.first);
     int gt_k = gt_result.second.second;
@@ -97,80 +104,131 @@ int main(int argc, char *argv[])
 
     int search_k = (k <= gt_k) ? k : gt_k;
 
+    // Pre-index base labels for fast filter-map generation
+    std::vector<std::vector<int>> label_to_ids(13);
+    for (int i = 0; i < (int)index.ntotal; i++)
+        label_to_ids[base_labels[i]].push_back(i);
+
     acorn::SearchParametersACORN params;
     params.efSearch = ef;
 
-    // --- Serial Search ---
-    printf("\n--- Serial Search (%d queries) ---\n", num_queries);
-    std::vector<acorn::idx_t> serial_labels(search_k * num_queries);
-    std::vector<float> serial_dist(search_k * num_queries);
+    // Warmup
+    printf("\n--- Warmup (100 queries, filtered) ---\n");
+    {
+        std::vector<acorn::idx_t> dummy_labels(search_k * 100);
+        std::vector<float> dummy_dist(search_k * 100);
+        int ql0 = query_labels[0];
+        std::vector<char> wf(index.ntotal, 0);
+        for (int id : label_to_ids[ql0])
+            wf[id] = 1;
+        for (int i = 0; i < 100; i++)
+        {
+            index.search(1, queries.data() + i * qd, search_k,
+                         dummy_dist.data() + i * search_k,
+                         dummy_labels.data() + i * search_k,
+                         wf.data(), &params);
+        }
+    }
+    printf("  Done.\n");
+
+    // --- Filtered Search ---
+    printf("\n--- Filtered Search (%d queries, ef=%d) ---\n", num_queries, ef);
+    std::vector<acorn::idx_t> labels(search_k * num_queries);
+    std::vector<float> distances(search_k * num_queries);
 
     t0 = get_ms();
     for (int i = 0; i < num_queries; i++)
     {
+        int ql = query_labels[i];
+        std::vector<char> filter_map(index.ntotal, 0);
+        for (int id : label_to_ids[ql])
+            filter_map[id] = 1;
+
         index.search(1, queries.data() + i * qd, search_k,
-                     serial_dist.data() + i * search_k,
-                     serial_labels.data() + i * search_k,
-                     &params);
-        if ((i + 1) % 100 == 0)
-            printf("  serial %d/%d (%.0f ms)\n", i + 1, num_queries, get_ms() - t0);
+                     distances.data() + i * search_k,
+                     labels.data() + i * search_k,
+                     filter_map.data(), &params);
     }
-    double serial_time = get_ms() - t0;
-    double serial_recall = compute_recall(num_queries, search_k, gt_ids, serial_labels);
-    printf("  Time: %.1f ms, Recall@%d: %.4f\n", serial_time, k, serial_recall);
+    double search_time = get_ms() - t0;
 
-    // --- Parallel Search ---
-    printf("\n--- Parallel Search (threads=%d, efs=%d) ---\n", num_threads, efs);
-    std::vector<acorn::idx_t> parallel_labels(search_k * num_queries);
-    std::vector<float> parallel_dist(search_k * num_queries);
+    double recall = compute_recall(num_queries, search_k, gt_ids, labels);
+    printf("  Time: %.1f ms, Avg: %.3f ms/q\n", search_time, search_time / num_queries);
+    printf("  Recall@%d: %.4f\n", k, recall);
 
-    t0 = get_ms();
+    // Filter compliance
+    int pass = 0, total = num_queries * search_k;
     for (int i = 0; i < num_queries; i++)
     {
-        index.parallelSearch(1, queries.data() + i * qd, search_k,
-                             parallel_dist.data() + i * search_k,
-                             parallel_labels.data() + i * search_k,
-                             num_threads, efs, &params);
-        if ((i + 1) % 10 == 0)
-            printf("  parallel %d/%d (%.0f ms)\n", i + 1, num_queries, get_ms() - t0);
-    }
-    double parallel_time = get_ms() - t0;
-    double parallel_recall = compute_recall(num_queries, search_k, gt_ids, parallel_labels);
-    printf("  Time: %.1f ms, Recall@%d: %.4f\n", parallel_time, k, parallel_recall);
-
-    // --- Result Comparison ---
-    printf("\n--- Result Comparison (first 5 queries, top-5) ---\n");
-    for (int q = 0; q < 5 && q < num_queries; q++)
-    {
-        printf("Query %d:\n", q);
-        printf("  Serial:  ");
-        for (int j = 0; j < 5; j++)
-            printf("[%ld,%.4f] ", serial_labels[q * search_k + j], serial_dist[q * search_k + j]);
-        printf("\n  Parallel: ");
-        for (int j = 0; j < 5; j++)
-            printf("[%ld,%.4f] ", parallel_labels[q * search_k + j], parallel_dist[q * search_k + j]);
-
-        // Count overlap
-        int overlap = 0;
-        std::vector<acorn::idx_t> s, p;
-        for (int j = 0; j < search_k; j++)
-            s.push_back(serial_labels[q * search_k + j]);
-        for (int j = 0; j < search_k; j++)
-            p.push_back(parallel_labels[q * search_k + j]);
-        std::sort(s.begin(), s.end());
-        std::sort(p.begin(), p.end());
+        int ql = query_labels[i];
         for (int j = 0; j < search_k; j++)
         {
-            if (std::binary_search(p.begin(), p.end(), s[j]))
-                overlap++;
+            int id = labels[i * search_k + j];
+            if (id >= 0 && base_labels[id] == ql)
+                pass++;
         }
-        printf("\n  Overlap: %d/%d\n", overlap, search_k);
+    }
+    printf("  Filter compliance: %d/%d (%.1f%%)\n", pass, total, 100.0 * pass / total);
+
+    // --- Parallel Filtered Search ---
+    printf("\n--- Parallel Filtered Search (%d queries, threads=%d, efs=%d) ---\n",
+           num_queries, num_threads, efs);
+    std::vector<acorn::idx_t> par_labels(search_k * num_queries);
+    std::vector<float> par_dist(search_k * num_queries);
+
+    // Build full filter_id_map array: num_queries * ntotal
+    std::vector<char> all_filter_maps(num_queries * index.ntotal, 0);
+    for (int i = 0; i < num_queries; i++)
+    {
+        int ql = query_labels[i];
+        char *fm = all_filter_maps.data() + i * index.ntotal;
+        for (int id : label_to_ids[ql])
+            fm[id] = 1;
+    }
+
+    t0 = get_ms();
+    index.parallelSearch(num_queries, queries.data(), search_k,
+                         par_dist.data(), par_labels.data(),
+                         all_filter_maps.data(),
+                         num_threads, efs, &params);
+    double par_time = get_ms() - t0;
+
+    double par_recall = compute_recall(num_queries, search_k, gt_ids, par_labels);
+    printf("  Time: %.1f ms, Avg: %.3f ms/q\n", par_time, par_time / num_queries);
+    printf("  Recall@%d: %.4f\n", k, par_recall);
+
+    // Filter compliance
+    pass = 0;
+    for (int i = 0; i < num_queries; i++)
+    {
+        int ql = query_labels[i];
+        for (int j = 0; j < search_k; j++)
+        {
+            int id = par_labels[i * search_k + j];
+            if (id >= 0 && base_labels[id] == ql)
+                pass++;
+        }
+    }
+    printf("  Filter compliance: %d/%d (%.1f%%)\n", pass, total, 100.0 * pass / total);
+
+    // Debug: check result distribution
+    {
+        int n_neg1 = 0, n_wrong = 0, n_ok = 0;
+        for (int i = 0; i < num_queries; i++) {
+            int ql = query_labels[i];
+            for (int j = 0; j < search_k; j++) {
+                int id = par_labels[i * search_k + j];
+                if (id < 0) n_neg1++;
+                else if (base_labels[id] != ql) n_wrong++;
+                else n_ok++;
+            }
+        }
+        printf("  Result breakdown: ok=%d -1=%d wrong_label=%d\n", n_ok, n_neg1, n_wrong);
     }
 
     printf("\n=== Summary ===\n");
-    printf("Serial:   time=%.1f ms, recall=%.4f\n", serial_time, serial_recall);
-    printf("Parallel: time=%.1f ms, recall=%.4f, speedup=%.2fx\n",
-           parallel_time, parallel_recall, serial_time / parallel_time);
+    printf("Serial (filtered):   time=%.1f ms, recall=%.4f\n", search_time, recall);
+    printf("Parallel (filtered): time=%.1f ms, recall=%.4f, speedup=%.2fx\n",
+           par_time, par_recall, search_time / par_time);
 
     return 0;
 }
