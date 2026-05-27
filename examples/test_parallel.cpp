@@ -106,7 +106,7 @@ int main(int argc, char *argv[])
     // Load index
     printf("Loading index from %s ...\n", index_file);
     double t0 = get_ms();
-    acorn::IndexACORNFlat index;
+    acorn::IndexACORN index;
     index.load(index_file);
     printf("  ntotal=%ld, d=%d, M=%d (%.0f ms)\n", index.ntotal, index.d, index.acorn.M, get_ms() - t0);
 

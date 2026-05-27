@@ -8,34 +8,25 @@
 
 #include "types.h"
 #include "index.h"
-#include "index_flat.h"
+#include "distance.h"
 #include "acorn_graph.h"
 
 namespace acorn {
 
-/** The ACORN index wraps a flat storage with an ACORN graph for efficient
- *  vector + predicate search.
- */
+/// Flat float32 vector storage + ACORN graph for efficient ANN search.
 struct IndexACORN : Index {
     typedef ACORN::storage_idx_t storage_idx_t;
 
     ACORN acorn;
-    bool own_fields;
-    Index* storage;
+    size_t code_size;
+    std::vector<uint8_t> codes;
     std::vector<int> metadata_storage;
 
-    IndexACORN() : Index(0, METRIC_L2), own_fields(false), storage(nullptr) {}
+    IndexACORN() : Index(0, METRIC_L2), code_size(0) {}
 
-    explicit IndexACORN(
-            int d, int M, int gamma,
-            std::vector<int>& metadata, int M_beta,
-            MetricType metric = METRIC_L2);
-
-    explicit IndexACORN(
-            Index* storage, int M, int gamma,
-            std::vector<int>& metadata, int M_beta);
-
-    ~IndexACORN() override;
+    IndexACORN(int d, int M, int gamma,
+               std::vector<int>& metadata, int M_beta,
+               MetricType metric = METRIC_L2);
 
     void add(idx_t n, const float* x) override;
     void train(idx_t n, const float* x) override;
@@ -71,7 +62,17 @@ struct IndexACORN : Index {
             const SearchParameters* params = nullptr) const;
 
     void reconstruct(idx_t key, float* recons) const override;
+    void reconstruct_n(idx_t i0, idx_t ni, float* recons) const;
     void reset() override;
+
+    size_t sa_code_size() const { return code_size; }
+    float* get_xb() { return (float*)codes.data(); }
+    const float* get_xb() const { return (const float*)codes.data(); }
+
+    FlatCodesDistanceComputer* get_FlatCodesDistanceComputer() const;
+    DistanceComputer* get_distance_computer() const override {
+        return get_FlatCodesDistanceComputer();
+    }
 
     void save(const char* filename) const;
     void load(const char* filename);
@@ -104,15 +105,6 @@ struct IndexACORN : Index {
         gettimeofday(&tv, NULL);
         return tv.tv_sec + tv.tv_usec * 1e-6;
     }
-};
-
-/** Flat index with ACORN graph on top. */
-struct IndexACORNFlat : IndexACORN {
-    IndexACORNFlat() : IndexACORN() {}
-    IndexACORNFlat(
-            int d, int M, int gamma,
-            std::vector<int>& metadata, int M_beta,
-            MetricType metric = METRIC_L2);
 };
 
 } // namespace acorn

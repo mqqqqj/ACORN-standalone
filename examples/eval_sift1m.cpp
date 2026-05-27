@@ -195,12 +195,12 @@ int main(int argc, char *argv[])
 
     // 4. Build or load index
     printf("\n--- Index ---\n");
-    acorn::IndexACORNFlat *index_ptr = nullptr;
+    acorn::IndexACORN *index_ptr = nullptr;
 
     if (skip_build)
     {
         printf("Loading index from %s ...\n", index_file);
-        index_ptr = new acorn::IndexACORNFlat();
+        index_ptr = new acorn::IndexACORN();
         t0 = get_ms();
         index_ptr->load(index_file);
         printf("  Loaded in %.1f ms\n", get_ms() - t0);
@@ -211,7 +211,7 @@ int main(int argc, char *argv[])
     {
         printf("Building ACORN index (M=%d, gamma=%d, efConstruction=%d)...\n",
                M, gamma, efConstruction);
-        index_ptr = new acorn::IndexACORNFlat(d, M, gamma, metadata, /*M_beta=*/M,
+        index_ptr = new acorn::IndexACORN(d, M, gamma, metadata, /*M_beta=*/M,
                                               acorn::METRIC_L2);
         index_ptr->verbose = true;
         index_ptr->acorn.efConstruction = efConstruction;

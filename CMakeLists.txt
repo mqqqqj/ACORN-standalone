@@ -11,7 +11,6 @@ find_package(OpenMP REQUIRED)
 # ACORN library
 set(ACORN_SOURCES
     src/index.cpp
-    src/index_flat.cpp
     src/acorn_graph.cpp
     src/index_acorn.cpp
     src/random.cpp
@@ -26,7 +25,6 @@ set(ACORN_HEADERS
     include/acorn/heap.h
     include/acorn/random.h
     include/acorn/index.h
-    include/acorn/index_flat.h
     include/acorn/acorn_graph.h
     include/acorn/index_acorn.h
     include/acorn/file_io.h

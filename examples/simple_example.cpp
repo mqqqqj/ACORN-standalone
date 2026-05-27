@@ -140,7 +140,7 @@ int main(int argc, char* argv[]) {
 
     // Build index
     printf("\nBuilding ACORN index...\n");
-    acorn::IndexACORNFlat index(d, M, gamma, metadata, /*M_beta=*/M, metric_type);
+    acorn::IndexACORN index(d, M, gamma, metadata, /*M_beta=*/M, metric_type);
     index.verbose = true;
     index.add(n, xb.data());
     printf("Index built. ntotal=%ld\n", index.ntotal);

@@ -3,11 +3,8 @@
 
 #include <omp.h>
 #include <cassert>
-#include <cinttypes>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <queue>
 #include <unordered_set>
 #include <stdint.h>
@@ -30,10 +27,50 @@ static double getmillisecs() {
 }
 
 /**************************************************************
- * add / search helpers
+ * Distance computer implementations
  **************************************************************/
 
 namespace {
+
+struct ACORNL2Dis : FlatCodesDistanceComputer {
+    size_t d;
+    const float* q;
+    const float* b;
+
+    float distance_to_code(const uint8_t* code) final {
+        return fvec_L2sqr(q, (const float*)code, d);
+    }
+
+    float symmetric_dis(idx_t i, idx_t j) override {
+        return fvec_L2sqr(b + j * d, b + i * d, d);
+    }
+
+    ACORNL2Dis(const IndexACORN& index, const float* q = nullptr)
+            : FlatCodesDistanceComputer(index.codes.data(), index.code_size),
+              d(index.d), q(q), b(index.get_xb()) {}
+
+    void set_query(const float* x) override { q = x; }
+};
+
+struct ACORNIPDis : FlatCodesDistanceComputer {
+    size_t d;
+    const float* q;
+    const float* b;
+
+    float distance_to_code(const uint8_t* code) final {
+        return fvec_inner_product(q, (const float*)code, d);
+    }
+
+    float symmetric_dis(idx_t i, idx_t j) override {
+        return fvec_inner_product(b + j * d, b + i * d, d);
+    }
+
+    ACORNIPDis(const IndexACORN& index, const float* q = nullptr)
+            : FlatCodesDistanceComputer(index.codes.data(), index.code_size),
+              d(index.d), q(q), b(index.get_xb()) {}
+
+    void set_query(const float* x) override { q = x; }
+};
 
 /// Wrap a distance computer to negate distances (for inner product search)
 struct NegativeDistanceComputer : DistanceComputer {
@@ -42,32 +79,43 @@ struct NegativeDistanceComputer : DistanceComputer {
     explicit NegativeDistanceComputer(DistanceComputer* basedis)
             : basedis(basedis) {}
 
-    void set_query(const float* x) override {
-        basedis->set_query(x);
-    }
+    void set_query(const float* x) override { basedis->set_query(x); }
 
-    float operator()(idx_t i) override {
-        return -(*basedis)(i);
-    }
+    float operator()(idx_t i) override { return -(*basedis)(i); }
 
     float symmetric_dis(idx_t i, idx_t j) override {
         return -basedis->symmetric_dis(i, j);
     }
 
-    virtual ~NegativeDistanceComputer() {
-        delete basedis;
-    }
+    virtual ~NegativeDistanceComputer() { delete basedis; }
 };
 
-DistanceComputer* storage_distance_computer(const Index* storage) {
-    if (storage->metric_type == METRIC_INNER_PRODUCT) {
-        return new NegativeDistanceComputer(storage->get_distance_computer());
+DistanceComputer* storage_distance_computer(const IndexACORN* index) {
+    if (index->metric_type == METRIC_INNER_PRODUCT) {
+        return new NegativeDistanceComputer(index->get_distance_computer());
     } else {
-        return storage->get_distance_computer();
+        return index->get_distance_computer();
     }
 }
 
-/// Add vertices to the ACORN graph (parallel)
+} // namespace
+
+FlatCodesDistanceComputer* IndexACORN::get_FlatCodesDistanceComputer() const {
+    if (metric_type == METRIC_L2) {
+        return new ACORNL2Dis(*this);
+    } else if (metric_type == METRIC_INNER_PRODUCT) {
+        return new ACORNIPDis(*this);
+    } else {
+        ACORN_THROW_MSG("metric type not supported");
+    }
+}
+
+/**************************************************************
+ * Graph construction helper (needed by IndexACORN::add)
+ **************************************************************/
+
+namespace {
+
 void acorn_add_vertices(
         IndexACORN& index_acorn,
         size_t n0,
@@ -96,12 +144,10 @@ void acorn_add_vertices(
     for (int i = 0; i < (int)ntotal; i++)
         omp_init_lock(&locks[i]);
 
-    // add vectors from highest to lowest level
     std::vector<int> hist;
     std::vector<int> order(n);
 
     {
-        // build histogram
         for (int i = 0; i < (int)n; i++) {
             storage_idx_t pt_id = i + n0;
             int pt_level = acorn.levels[pt_id] - 1;
@@ -109,13 +155,11 @@ void acorn_add_vertices(
             hist[pt_level]++;
         }
 
-        // accumulate
         std::vector<int> offsets(hist.size() + 1, 0);
         for (int i = 0; i < (int)hist.size() - 1; i++) {
             offsets[i + 1] = offsets[i] + hist[i];
         }
 
-        // bucket sort
         for (int i = 0; i < (int)n; i++) {
             storage_idx_t pt_id = i + n0;
             int pt_level = acorn.levels[pt_id] - 1;
@@ -123,7 +167,6 @@ void acorn_add_vertices(
         }
     }
 
-    // perform add
     {
         RandomGenerator rng2(789);
         int i1 = n;
@@ -135,7 +178,6 @@ void acorn_add_vertices(
                 printf("Adding %d elements at level %d\n", i1 - i0, pt_level);
             }
 
-            // random permutation to remove dataset order bias
             for (int j = i0; j < i1; j++)
                 std::swap(order[j], order[j + rng2.rand_int(i1 - j)]);
 
@@ -143,7 +185,7 @@ void acorn_add_vertices(
             {
                 VisitedTable vt(ntotal);
 
-                DistanceComputer* dis = storage_distance_computer(index_acorn.storage);
+                DistanceComputer* dis = storage_distance_computer(&index_acorn);
                 ScopeDeleter1<DistanceComputer> del(dis);
                 int prev_display = verbose && omp_get_thread_num() == 0 ? 0 : -1;
 
@@ -175,33 +217,60 @@ void acorn_add_vertices(
 } // namespace
 
 /**************************************************************
- * IndexACORN implementation
+ * IndexACORN: vector storage + add
+ **************************************************************/
+
+/**************************************************************
+ * IndexACORN: vector storage
  **************************************************************/
 
 IndexACORN::IndexACORN(int d, int M, int gamma, std::vector<int>& metadata,
                        int M_beta, MetricType metric)
         : Index(d, metric),
           acorn(M, gamma, metadata, M_beta),
-          own_fields(false),
-          storage(nullptr) {}
-
-IndexACORN::IndexACORN(Index* storage, int M, int gamma,
-                       std::vector<int>& metadata, int M_beta)
-        : Index(storage->d, storage->metric_type),
-          acorn(M, gamma, metadata, M_beta),
-          own_fields(false),
-          storage(storage) {}
-
-IndexACORN::~IndexACORN() {
-    if (own_fields) delete storage;
-}
-
-void IndexACORN::train(idx_t n, const float* x) {
-    ACORN_THROW_IF_NOT_MSG(storage,
-            "Please use IndexACORNFlat (or variants) instead of IndexACORN directly");
-    storage->train(n, x);
+          code_size(sizeof(float) * d) {
     is_trained = true;
 }
+
+void IndexACORN::train(idx_t, const float*) {
+    is_trained = true;
+}
+
+void IndexACORN::add(idx_t n, const float* x) {
+    ACORN_THROW_IF_NOT(is_trained);
+
+    // Store vectors
+    int n0 = ntotal;
+    if (n > 0) {
+        codes.resize((ntotal + n) * code_size);
+        memcpy(codes.data() + (ntotal * code_size), x, n * code_size);
+        ntotal += n;
+    }
+
+    // Build ACORN graph
+    if (n > 0) {
+        acorn_add_vertices(*this, n0, n, x, verbose, acorn.levels.size() == ntotal);
+    }
+}
+
+void IndexACORN::reset() {
+    acorn.reset();
+    codes.clear();
+    ntotal = 0;
+}
+
+void IndexACORN::reconstruct_n(idx_t i0, idx_t ni, float* recons) const {
+    ACORN_THROW_IF_NOT(ni == 0 || (i0 >= 0 && i0 + ni <= ntotal));
+    memcpy(recons, codes.data() + i0 * code_size, ni * code_size);
+}
+
+void IndexACORN::reconstruct(idx_t key, float* recons) const {
+    reconstruct_n(key, 1, recons);
+}
+
+/**************************************************************
+ * Search wrappers
+ **************************************************************/
 
 // Hybrid search (with attribute filters)
 void IndexACORN::search(
@@ -214,8 +283,6 @@ void IndexACORN::search(
         const SearchParameters* params_in) const {
 
     ACORN_THROW_IF_NOT(k > 0);
-    ACORN_THROW_IF_NOT_MSG(storage,
-            "Please use IndexACORNFlat (or variants) instead of IndexACORN directly");
 
     const SearchParametersACORN* params = nullptr;
     if (params_in) {
@@ -231,7 +298,7 @@ void IndexACORN::search(
     {
         VisitedTable vt(ntotal);
 
-        DistanceComputer* dis = storage_distance_computer(storage);
+        DistanceComputer* dis = storage_distance_computer(this);
         ScopeDeleter1<DistanceComputer> del(dis);
 
 #pragma omp for reduction(+ : n1, n2, n3, ndis, nreorder, candidates_loop)
@@ -277,8 +344,6 @@ void IndexACORN::search(
         const SearchParameters* params_in) const {
 
     ACORN_THROW_IF_NOT(k > 0);
-    ACORN_THROW_IF_NOT_MSG(storage,
-            "Please use IndexACORNFlat (or variants) instead of IndexACORN directly");
 
     const SearchParametersACORN* params = nullptr;
     if (params_in) {
@@ -292,7 +357,7 @@ void IndexACORN::search(
     {
         VisitedTable vt(ntotal);
 
-        DistanceComputer* dis = storage_distance_computer(storage);
+        DistanceComputer* dis = storage_distance_computer(this);
         ScopeDeleter1<DistanceComputer> del(dis);
 
 #pragma omp for reduction(+ : n1, n2, n3, ndis, nreorder)
@@ -332,8 +397,6 @@ void IndexACORN::parallelSearch(
         const SearchParameters* params_in) const {
 
     ACORN_THROW_IF_NOT(k > 0);
-    ACORN_THROW_IF_NOT_MSG(storage,
-            "Please use IndexACORNFlat (or variants) instead of IndexACORN directly");
 
     const SearchParametersACORN* params = nullptr;
     if (params_in) {
@@ -346,7 +409,7 @@ void IndexACORN::parallelSearch(
     for (idx_t i = 0; i < n; i++) {
         VisitedTable vt(ntotal);
 
-        DistanceComputer* dis = storage_distance_computer(storage);
+        DistanceComputer* dis = storage_distance_computer(this);
         ScopeDeleter1<DistanceComputer> del(dis);
 
         idx_t* idxi = labels + i * k;
@@ -373,26 +436,9 @@ void IndexACORN::parallelSearch(
     acorn_stats.combine({n1, n2, n3, ndis, nreorder});
 }
 
-void IndexACORN::add(idx_t n, const float* x) {
-    ACORN_THROW_IF_NOT_MSG(storage,
-            "Please use IndexACORNFlat (or variants) instead of IndexACORN directly");
-    ACORN_THROW_IF_NOT(is_trained);
-    int n0 = ntotal;
-    storage->add(n, x);
-    ntotal = storage->ntotal;
-
-    acorn_add_vertices(*this, n0, n, x, verbose, acorn.levels.size() == ntotal);
-}
-
-void IndexACORN::reset() {
-    acorn.reset();
-    storage->reset();
-    ntotal = 0;
-}
-
-void IndexACORN::reconstruct(idx_t key, float* recons) const {
-    storage->reconstruct(key, recons);
-}
+/**************************************************************
+ * Save / Load / Print
+ **************************************************************/
 
 void IndexACORN::printStats(bool print_edge_list, bool print_filtered_edge_lists,
                              int filter, Operation op) {
@@ -417,11 +463,10 @@ void IndexACORN::save(const char* filename) const {
     int mt = (int)metric_type;
     fwrite(&mt, sizeof(int), 1, fp);
 
-    // storage (IndexFlat codes)
-    IndexFlat* flat = dynamic_cast<IndexFlat*>(storage);
-    size_t code_size = flat->code_size;
-    fwrite(&code_size, sizeof(size_t), 1, fp);
-    fwrite(flat->codes.data(), 1, flat->codes.size(), fp);
+    // vector codes
+    size_t cs = code_size;
+    fwrite(&cs, sizeof(size_t), 1, fp);
+    fwrite(codes.data(), 1, codes.size(), fp);
 
     // metadata
     size_t meta_sz = (size_t)ntotal;
@@ -452,18 +497,12 @@ void IndexACORN::load(const char* filename) {
     fread(&mt, sizeof(int), 1, fp);
     metric_type = (MetricType)mt;
 
-    // storage
-    size_t code_size;
-    fread(&code_size, sizeof(size_t), 1, fp);
-    IndexFlat* flat = new IndexFlat(d, metric_type);
-    flat->code_size = code_size;
-    flat->ntotal = ntotal;
-    flat->d = d;
-    flat->is_trained = true;
-    flat->codes.resize(ntotal * code_size);
-    fread(flat->codes.data(), 1, ntotal * code_size, fp);
-    storage = flat;
-    own_fields = true;
+    // vector codes
+    size_t cs;
+    fread(&cs, sizeof(size_t), 1, fp);
+    code_size = cs;
+    codes.resize(ntotal * code_size);
+    fread(codes.data(), 1, ntotal * code_size, fp);
 
     // metadata
     size_t meta_sz;
@@ -476,18 +515,6 @@ void IndexACORN::load(const char* filename) {
     acorn.metadata = metadata_storage.data();
 
     fclose(fp);
-    is_trained = true;
-}
-
-/**************************************************************
- * IndexACORNFlat implementation
- **************************************************************/
-
-IndexACORNFlat::IndexACORNFlat(int d, int M, int gamma,
-                                std::vector<int>& metadata, int M_beta,
-                                MetricType metric)
-        : IndexACORN(new IndexFlat(d, metric), M, gamma, metadata, M_beta) {
-    own_fields = true;
     is_trained = true;
 }
 
