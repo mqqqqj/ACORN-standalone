@@ -60,4 +60,49 @@ void write_fbin(const char* filename, const float* data, int n, int d) {
     }
 }
 
+std::vector<int> read_ibin(const char* filename, int expected_n) {
+    FILE* fp = fopen(filename, "rb");
+    if (!fp) {
+        throw std::runtime_error(std::string("cannot open file: ") + filename);
+    }
+    int n;
+    if (fread(&n, sizeof(int), 1, fp) != 1) {
+        fclose(fp);
+        throw std::runtime_error(std::string("failed to read header from: ") + filename);
+    }
+    if (expected_n > 0 && n != expected_n) {
+        fclose(fp);
+        throw std::runtime_error(
+            std::string("label file count mismatch: expected ") +
+            std::to_string(expected_n) + ", got " + std::to_string(n));
+    }
+    std::vector<int> labels(n);
+    if (fread(labels.data(), sizeof(int), n, fp) != (size_t)n) {
+        fclose(fp);
+        throw std::runtime_error(std::string("file truncated: ") + filename);
+    }
+    fclose(fp);
+    return labels;
+}
+
+std::pair<std::vector<int>, std::pair<int, int>> read_groundtruth(const char* filename) {
+    FILE* fp = fopen(filename, "rb");
+    if (!fp) {
+        throw std::runtime_error(std::string("cannot open file: ") + filename);
+    }
+    int nq, k;
+    if (fread(&nq, sizeof(int), 1, fp) != 1 ||
+        fread(&k, sizeof(int), 1, fp) != 1) {
+        fclose(fp);
+        throw std::runtime_error(std::string("failed to read header from: ") + filename);
+    }
+    std::vector<int> ids((size_t)nq * k);
+    if (fread(ids.data(), sizeof(int), nq * k, fp) != (size_t)(nq * k)) {
+        fclose(fp);
+        throw std::runtime_error(std::string("file truncated: ") + filename);
+    }
+    fclose(fp);
+    return {std::move(ids), {nq, k}};
+}
+
 } // namespace acorn

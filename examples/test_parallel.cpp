@@ -16,44 +16,6 @@ static double get_ms()
     return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
-static std::vector<int> load_labels(const char *filename, int expected_n)
-{
-    FILE *fp = fopen(filename, "rb");
-    if (!fp)
-    {
-        fprintf(stderr, "Cannot open %s\n", filename);
-        exit(1);
-    }
-    int n;
-    fread(&n, sizeof(int), 1, fp);
-    if (n != expected_n)
-    {
-        fprintf(stderr, "Label file n=%d, expected %d\n", n, expected_n);
-        exit(1);
-    }
-    std::vector<int> labels(n);
-    fread(labels.data(), sizeof(int), n, fp);
-    fclose(fp);
-    return labels;
-}
-
-static std::pair<std::vector<int>, std::pair<int, int>> load_groundtruth(const char *filename)
-{
-    FILE *fp = fopen(filename, "rb");
-    if (!fp)
-    {
-        fprintf(stderr, "Cannot open %s\n", filename);
-        exit(1);
-    }
-    int nq, k;
-    fread(&nq, sizeof(int), 1, fp);
-    fread(&k, sizeof(int), 1, fp);
-    std::vector<int> gt_ids(nq * k);
-    fread(gt_ids.data(), sizeof(int), nq * k, fp);
-    fclose(fp);
-    return {std::move(gt_ids), {nq, k}};
-}
-
 static double compute_recall(int nq, int k, const std::vector<int> &gt_ids,
                              const std::vector<acorn::idx_t> &results)
 {
@@ -123,12 +85,12 @@ int main(int argc, char *argv[])
 
     // Load labels (needed for index metadata matching)
     printf("Loading labels from %s ...\n", label_file);
-    std::vector<int> metadata = load_labels(label_file, index.ntotal);
+    std::vector<int> metadata = acorn::read_ibin(label_file, index.ntotal);
     printf("  %zu labels loaded\n", metadata.size());
 
     // Load groundtruth
     printf("Loading groundtruth from %s ...\n", gt_file);
-    auto gt_result = load_groundtruth(gt_file);
+    auto gt_result = acorn::read_groundtruth(gt_file);
     std::vector<int> gt_ids = std::move(gt_result.first);
     int gt_k = gt_result.second.second;
     printf("  gt nq=%d, k=%d\n", (int)gt_ids.size() / gt_k, gt_k);

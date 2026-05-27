@@ -16,48 +16,6 @@ static double get_ms()
     return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
 }
 
-static std::vector<int> load_labels(const char *filename, int expected_n)
-{
-    FILE *fp = fopen(filename, "rb");
-    if (!fp)
-    {
-        fprintf(stderr, "Error: cannot open %s\n", filename);
-        exit(1);
-    }
-    int n;
-    fread(&n, sizeof(int), 1, fp);
-    if (n != expected_n)
-    {
-        fprintf(stderr, "Error: label file has n=%d, expected %d\n", n, expected_n);
-        exit(1);
-    }
-    std::vector<int> labels(n);
-    fread(labels.data(), sizeof(int), n, fp);
-    fclose(fp);
-    return labels;
-}
-
-static std::pair<std::vector<int>, std::pair<int, int>> load_groundtruth(const char *filename)
-{
-    FILE *fp = fopen(filename, "rb");
-    if (!fp)
-    {
-        fprintf(stderr, "Error: cannot open %s\n", filename);
-        exit(1);
-    }
-    int nq, k;
-    fread(&nq, sizeof(int), 1, fp);
-    fread(&k, sizeof(int), 1, fp);
-    std::vector<int> gt_ids(nq * k);
-    fread(gt_ids.data(), sizeof(int), nq * k, fp);
-    fclose(fp);
-
-    printf("Loaded ground truth: nq=%d, k=%d\n", nq, k);
-    printf("  First 5 IDs for query 0: %d %d %d %d %d\n",
-           gt_ids[0], gt_ids[1], gt_ids[2], gt_ids[3], gt_ids[4]);
-    return {std::move(gt_ids), {nq, k}};
-}
-
 static double compute_recall(int k, const std::vector<int> &gt_ids,
                              const std::vector<acorn::idx_t> &results)
 {
@@ -171,13 +129,13 @@ int main(int argc, char *argv[])
     // 2. Load pre-computed labels
     printf("\nLoading labels from %s ...\n", label_file);
     t0 = get_ms();
-    std::vector<int> metadata = load_labels(label_file, n);
+    std::vector<int> metadata = acorn::read_ibin(label_file, n);
     printf("  Loaded %zu labels (%.1f ms)\n", metadata.size(), get_ms() - t0);
 
     // 3. Load pre-computed ground truth
     printf("\nLoading ground truth from %s ...\n", gt_file);
     t0 = get_ms();
-    std::pair<std::vector<int>, std::pair<int, int>> gt_result = load_groundtruth(gt_file);
+    std::pair<std::vector<int>, std::pair<int, int>> gt_result = acorn::read_groundtruth(gt_file);
     std::vector<int> gt_ids = std::move(gt_result.first);
     int gt_nq = gt_result.second.first;
     int gt_k = gt_result.second.second;
