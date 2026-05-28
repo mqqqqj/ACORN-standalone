@@ -173,17 +173,73 @@ int ACORN::search(const float* query, const float* xb, int d, int metric,
         if (cur_nb.expanded) {
             cur_nb.expanded = false;
             neighbor_range(cur_nb.id, 0, &begin, &end);
-            for (size_t j = begin; j < end; j++) {
-                int v = neighbors[j];
-                if (v < 0) break;
-                if (filter_map && !filter_map[v]) continue;
-                if (visited[v] == vis_mark) continue;
-                visited[v] = vis_mark;
-                float dv = compute_dist(query, xb, d, metric, v);
-                if (pool_size == L && dv >= pool[L - 1].distance) continue;
-                int r = InsertIntoPool(pool.data(), pool_size, L,
-                                       SearchNeighbor(v, dv, true));
-                if (r < cur) cur = r;
+
+            if (!filter_map) {
+                // Non-filtered search: simple neighbor expansion
+                for (size_t j = begin; j < end; j++) {
+                    int v = neighbors[j];
+                    if (v < 0) break;
+                    if (visited[v] == vis_mark) continue;
+                    visited[v] = vis_mark;
+                    float dv = compute_dist(query, xb, d, metric, v);
+                    if (pool_size == L && dv >= pool[L - 1].distance) continue;
+                    int r = InsertIntoPool(pool.data(), pool_size, L,
+                                           SearchNeighbor(v, dv, true));
+                    if (r < cur) cur = r;
+                }
+            } else {
+                // ACORN hybrid search: gamma/M_beta/num_found logic
+                int num_found = 0;
+                bool keep_expanding = true;
+                int neighbor_idx = 0;
+
+                for (size_t j = begin; j < end; j++, neighbor_idx++) {
+                    int v1 = neighbors[j];
+                    if (v1 < 0) break;
+
+                    if (filter_map[v1]) num_found++;
+
+                    if (visited[v1] != vis_mark && filter_map[v1]) {
+                        visited[v1] = vis_mark;
+                        float dv = compute_dist(query, xb, d, metric, v1);
+                        if (pool_size < L || dv < pool[L - 1].distance) {
+                            int r = InsertIntoPool(pool.data(), pool_size, L,
+                                                   SearchNeighbor(v1, dv, true));
+                            if (r < cur) cur = r;
+                        }
+                        if (num_found >= M * 2) { keep_expanding = false; break; }
+                    }
+
+                    // Neighbor-of-neighbor expansion
+                    if ((neighbor_idx >= M_beta && keep_expanding) || gamma == 1) {
+                        // When gamma==1: expand from all v1 (filtered or not)
+                        // When gamma>1: only expand from filtered v1 (after M_beta)
+                        if (gamma == 1 || filter_map[v1]) {
+                            size_t b2, e2;
+                            neighbor_range(v1, 0, &b2, &e2);
+                            for (size_t j2 = b2; j2 < e2; j2++) {
+                                int v2 = neighbors[j2];
+                                if (v2 < 0) break;
+
+                                if (filter_map[v2]) num_found++;
+                                else continue;  // skip non-filtered in expansion
+
+                                if (visited[v2] == vis_mark) continue;
+                                visited[v2] = vis_mark;
+                                float d2 = compute_dist(query, xb, d, metric, v2);
+                                if (pool_size < L || d2 < pool[L - 1].distance) {
+                                    int r = InsertIntoPool(pool.data(), pool_size, L,
+                                                           SearchNeighbor(v2, d2, true));
+                                    if (r < cur) cur = r;
+                                }
+                                if (num_found >= M * 2) {
+                                    keep_expanding = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         cur++;
@@ -274,17 +330,60 @@ int ACORN::parallel_search(const float* query, const float* xb, int d, int metri
                     cn.expanded = false; step++;
                     size_t b, e;
                     neighbor_range(cn.id, 0, &b, &e);
-                    for (size_t j = b; j < e; j++) {
-                        int v = neighbors[j];
-                        if (v < 0) break;
-                        if (filter_map && !filter_map[v]) continue;
-                        if (visited[v] == vis_mark) continue;
-                        visited[v] = vis_mark;
-                        float dv = comp_dist(v);
-                        if (local_size == efs && dv >= local_pool[efs - 1].distance) continue;
-                        int r = InsertIntoPool(local_pool.data(), local_size, efs,
-                                               SearchNeighbor(v, dv, true));
-                        if (r < cur) cur = r;
+
+                    if (!filter_map) {
+                        for (size_t j = b; j < e; j++) {
+                            int v = neighbors[j];
+                            if (v < 0) break;
+                            if (visited[v] == vis_mark) continue;
+                            visited[v] = vis_mark;
+                            float dv = comp_dist(v);
+                            if (local_size == efs && dv >= local_pool[efs - 1].distance) continue;
+                            int r = InsertIntoPool(local_pool.data(), local_size, efs,
+                                                   SearchNeighbor(v, dv, true));
+                            if (r < cur) cur = r;
+                        }
+                    } else {
+                        int num_found = 0;
+                        bool keep_expanding = true;
+                        int neighbor_idx = 0;
+                        for (size_t j = b; j < e; j++, neighbor_idx++) {
+                            int v1 = neighbors[j];
+                            if (v1 < 0) break;
+                            if (filter_map[v1]) num_found++;
+                            if (visited[v1] != vis_mark && filter_map[v1]) {
+                                visited[v1] = vis_mark;
+                                float dv = comp_dist(v1);
+                                if (local_size < efs || dv < local_pool[efs - 1].distance) {
+                                    int r = InsertIntoPool(local_pool.data(), local_size, efs,
+                                                           SearchNeighbor(v1, dv, true));
+                                    if (r < cur) cur = r;
+                                }
+                                if (num_found >= M * 2) { keep_expanding = false; break; }
+                            }
+                            if ((neighbor_idx >= M_beta && keep_expanding) || gamma == 1) {
+                                if (gamma == 1 || filter_map[v1]) {
+                                    size_t b2, e2;
+                                    neighbor_range(v1, 0, &b2, &e2);
+                                    for (size_t j2 = b2; j2 < e2; j2++) {
+                                        int v2 = neighbors[j2];
+                                        if (v2 < 0) break;
+                                        if (filter_map[v2]) num_found++;
+                                        else continue;
+                                        if (visited[v2] != vis_mark) {
+                                            visited[v2] = vis_mark;
+                                            float d2 = comp_dist(v2);
+                                            if (local_size < efs || d2 < local_pool[efs - 1].distance) {
+                                                int r = InsertIntoPool(local_pool.data(), local_size, efs,
+                                                                       SearchNeighbor(v2, d2, true));
+                                                if (r < cur) cur = r;
+                                            }
+                                        }
+                                        if (num_found >= M * 2) { keep_expanding = false; break; }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 cur++;
@@ -390,4 +489,318 @@ void ACORN::print_neighbor_stats(bool, bool, int, Operation) const {
            entry_point, max_level, gamma, M, M_beta);
 }
 
+// ============================================================
+// Construction
+// ============================================================
+
+// Build ACORN graph for n new vertices appended to existing n0
+void acorn_build(ACORN& acorn, int n0, int n, const float* xb,
+                 int d, int metric, bool verbose) {
+    int ntotal = n0 + n;
+    if (n == 0) return;
+
+    acorn.prepare_level_tab(n, false);
+    if (verbose) printf("  max_level = %d\n", acorn.max_level);
+
+    // Init locks
+    std::vector<omp_lock_t> locks(ntotal);
+    for (int i = 0; i < ntotal; i++) omp_init_lock(&locks[i]);
+
+    // Bucket-sort new vertices by level
+    std::vector<int> hist, order(n);
+    for (int i = 0; i < n; i++) {
+        int lvl = acorn.levels[i + n0] - 1;
+        while (lvl >= (int)hist.size()) hist.push_back(0);
+        hist[lvl]++;
+    }
+    std::vector<int> off(hist.size() + 1, 0);
+    for (int i = 0; i < (int)hist.size() - 1; i++)
+        off[i + 1] = off[i] + hist[i];
+    for (int i = 0; i < n; i++) {
+        int lvl = acorn.levels[i + n0] - 1;
+        order[off[lvl]++] = i + n0;
+    }
+
+    // Precompute efConstruction (same as search ef)
+    int ef = acorn.efConstruction;
+
+    // Add from highest to lowest level
+    RandomGenerator rng2(789);
+    int i1 = n;
+    for (int pt_level = (int)hist.size() - 1; pt_level >= 0; pt_level--) {
+        int i0 = i1 - hist[pt_level];
+        if (verbose) printf("  Adding %d elements at level %d\n", i1 - i0, pt_level);
+
+        // Random permutation
+        for (int j = i0; j < i1; j++)
+            std::swap(order[j], order[j + rng2.rand_int(i1 - j)]);
+
+#pragma omp parallel if (i1 > i0 + 100)
+        {
+            std::vector<uint8_t> visited(ntotal, 0);
+            int vis_mark = 1;
+
+#pragma omp for schedule(static)
+            for (int i = i0; i < i1; i++) {
+                int pt_id = order[i];
+                const float* q = xb + (size_t)pt_id * d;
+
+                // Get entry point (critical section for first vertex)
+                int nearest;
+#pragma omp critical
+                {
+                    nearest = acorn.entry_point;
+                    if (nearest == -1) {
+                        acorn.max_level = pt_level;
+                        acorn.entry_point = pt_id;
+                        for (int l = 0; l <= acorn.max_level; l++)
+                            acorn.nb_per_level[l]++;
+                    }
+                }
+                if (nearest < 0) continue;
+
+                omp_set_lock(&locks[pt_id]);
+
+                // Greedy descent on upper levels
+                int level = acorn.max_level;
+                float d_nearest = compute_dist(q, xb, d, metric, nearest);
+                std::vector<int> ep_per_level(acorn.max_level + 1);
+                ep_per_level[level] = nearest;
+
+                for (; level > pt_level; level--) {
+                    // Greedy update at upper level
+                    for (;;) {
+                        int prev = nearest;
+                        size_t b, e;
+                        acorn.neighbor_range(nearest, level, &b, &e);
+                        int num = 0;
+                        for (size_t j = b; j < e; j++) {
+                            int v = acorn.neighbors[j];
+                            if (v < 0) break;
+                            num++;
+                            float dv = compute_dist(q, xb, d, metric, v);
+                            if (dv < d_nearest) { d_nearest = dv; nearest = v; }
+                            if (num >= acorn.M) break;
+                        }
+                        if (nearest == prev) break;
+                    }
+                    ep_per_level[level] = nearest;
+                }
+
+                // Add links at each level from pt_level down to 0
+                for (; level >= 0; level--) {
+                    // Search for neighbor candidates at this level
+                    int pool_cap = ef;
+                    std::vector<SearchNeighbor> pool(pool_cap + 1);
+                    int pool_sz = 0;
+
+                    // Initialize pool with nearest (ep_per_level for level > pt_level)
+                    int ep = (level > pt_level) ? ep_per_level[level] : nearest;
+                    float ep_d = compute_dist(q, xb, d, metric, ep);
+                    visited[ep] = vis_mark;
+                    InsertIntoPool(pool.data(), pool_sz, pool_cap,
+                                   SearchNeighbor(ep, ep_d, true));
+
+                    // BFiS at this level
+                    int cur = 0;
+                    while (cur < pool_sz) {
+                        auto& cn = pool[cur];
+                        if (cn.expanded) {
+                            cn.expanded = false;
+                            size_t b, e;
+                            acorn.neighbor_range(cn.id, level, &b, &e);
+                            int num_iters = 0;
+                            for (size_t j = b; j < e; j++) {
+                                int v = acorn.neighbors[j];
+                                if (v < 0) break;
+                                if (visited[v] == vis_mark) continue;
+                                visited[v] = vis_mark;
+                                float dv = compute_dist(q, xb, d, metric, v);
+                                num_iters++;
+                                if (pool_sz == pool_cap && dv >= pool[pool_cap - 1].distance)
+                                    continue;
+                                int r = InsertIntoPool(pool.data(), pool_sz, pool_cap,
+                                                       SearchNeighbor(v, dv, true));
+                                if (r < cur) cur = r;
+                                if (num_iters > acorn.M) break;
+                            }
+                        }
+                        cur++;
+                    }
+
+                    vis_mark++;
+                    if (vis_mark > 200) {
+                        memset(visited.data(), 0, ntotal);
+                        vis_mark = 1;
+                    }
+
+                    // Convert pool to sorted (dist, id) list
+                    std::vector<std::pair<float, int>> candidates;
+                    for (int kk = 0; kk < pool_sz; kk++)
+                        candidates.emplace_back(pool[kk].distance, pool[kk].id);
+                    std::sort(candidates.begin(), candidates.end());
+
+                    // At level 0, apply ACORN pruning
+                    int max_neighbors = acorn.nb_neighbors(level);
+                    if (level == 0 && (int)candidates.size() > max_neighbors) {
+                        std::unordered_set<int> neigh_of_neigh;
+                        std::vector<std::pair<float, int>> pruned;
+                        int node_num = 0;
+                        for (auto& c : candidates) {
+                            node_num++;
+                            bool good = true;
+                            if (node_num > acorn.M_beta && neigh_of_neigh.count(c.second))
+                                good = false;
+                            if (good) {
+                                pruned.push_back(c);
+                                if ((int)pruned.size() >= max_neighbors) break;
+                                neigh_of_neigh.insert(c.second);
+                                if (node_num > acorn.M_beta) {
+                                    size_t b, e;
+                                    acorn.neighbor_range(c.second, 0, &b, &e);
+                                    for (size_t j = b; j < e; j++) {
+                                        if (acorn.neighbors[j] < 0) break;
+                                        neigh_of_neigh.insert(acorn.neighbors[j]);
+                                    }
+                                }
+                                if ((int)neigh_of_neigh.size() >= max_neighbors) break;
+                            }
+                        }
+                        candidates = std::move(pruned);
+                    } else if ((int)candidates.size() > max_neighbors) {
+                        candidates.resize(max_neighbors);
+                    }
+
+                    // Add bidirectional links
+                    std::vector<int> added;
+                    for (auto& c : candidates) {
+                        int other = c.second;
+
+                        // Add pt_id -> other link
+                        {
+                            size_t b, e;
+                            acorn.neighbor_range(pt_id, level, &b, &e);
+                            if (acorn.neighbors[e - 1] == -1) {
+                                // Find empty slot
+                                size_t pos = e;
+                                while (pos > b && acorn.neighbors[pos - 1] == -1) pos--;
+                                acorn.neighbors[pos] = other;
+                            } else {
+                                // Collect existing + new, sort by sym dist
+                                std::vector<std::pair<float, int>> nl;
+                                float d_sym = compute_dist(xb + (size_t)other * d, xb, d, metric, pt_id);
+                                nl.emplace_back(d_sym, other);
+                                for (size_t j = b; j < e; j++) {
+                                    int vv = acorn.neighbors[j];
+                                    float ds = compute_dist(xb + (size_t)vv * d, xb, d, metric, pt_id);
+                                    nl.emplace_back(ds, vv);
+                                }
+                                std::sort(nl.begin(), nl.end());
+                                if (level == 0 && (int)nl.size() > max_neighbors) {
+                                    std::unordered_set<int> non;
+                                    std::vector<std::pair<float, int>> pr;
+                                    int nn = 0;
+                                    for (auto& p : nl) {
+                                        nn++;
+                                        bool ok = true;
+                                        if (nn > acorn.M_beta && non.count(p.second)) ok = false;
+                                        if (ok) {
+                                            pr.push_back(p);
+                                            if ((int)pr.size() >= max_neighbors) break;
+                                            non.insert(p.second);
+                                            if (nn > acorn.M_beta) {
+                                                size_t b2, e2;
+                                                acorn.neighbor_range(p.second, 0, &b2, &e2);
+                                                for (size_t j2 = b2; j2 < e2; j2++) {
+                                                    if (acorn.neighbors[j2] < 0) break;
+                                                    non.insert(acorn.neighbors[j2]);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    nl = std::move(pr);
+                                } else if ((int)nl.size() > max_neighbors) {
+                                    nl.resize(max_neighbors);
+                                }
+                                size_t pos = b;
+                                for (auto& p : nl) acorn.neighbors[pos++] = p.second;
+                                while (pos < e) acorn.neighbors[pos++] = -1;
+                            }
+                        }
+                        added.push_back(other);
+                    }
+
+                    // Add reverse links (other -> pt_id)
+                    omp_unset_lock(&locks[pt_id]);
+                    for (int other : added) {
+                        omp_set_lock(&locks[other]);
+                        size_t b, e;
+                        acorn.neighbor_range(other, level, &b, &e);
+                        if (acorn.neighbors[e - 1] == -1) {
+                            size_t pos = e;
+                            while (pos > b && acorn.neighbors[pos - 1] == -1) pos--;
+                            acorn.neighbors[pos] = pt_id;
+                        } else {
+                            std::vector<std::pair<float, int>> nl;
+                            float d_sym = compute_dist(xb + (size_t)pt_id * d, xb, d, metric, other);
+                            nl.emplace_back(d_sym, pt_id);
+                            for (size_t j = b; j < e; j++) {
+                                int vv = acorn.neighbors[j];
+                                float ds = compute_dist(xb + (size_t)vv * d, xb, d, metric, other);
+                                nl.emplace_back(ds, vv);
+                            }
+                            std::sort(nl.begin(), nl.end());
+                            if (level == 0 && (int)nl.size() > max_neighbors) {
+                                std::unordered_set<int> non;
+                                std::vector<std::pair<float, int>> pr;
+                                int nn = 0;
+                                for (auto& p : nl) {
+                                    nn++;
+                                    bool ok = true;
+                                    if (nn > acorn.M_beta && non.count(p.second)) ok = false;
+                                    if (ok) {
+                                        pr.push_back(p);
+                                        if ((int)pr.size() >= max_neighbors) break;
+                                        non.insert(p.second);
+                                        if (nn > acorn.M_beta) {
+                                            size_t b2, e2;
+                                            acorn.neighbor_range(p.second, 0, &b2, &e2);
+                                            for (size_t j2 = b2; j2 < e2; j2++) {
+                                                if (acorn.neighbors[j2] < 0) break;
+                                                non.insert(acorn.neighbors[j2]);
+                                            }
+                                        }
+                                    }
+                                }
+                                nl = std::move(pr);
+                            } else if ((int)nl.size() > max_neighbors) {
+                                nl.resize(max_neighbors);
+                            }
+                            size_t pos = b;
+                            for (auto& p : nl) acorn.neighbors[pos++] = p.second;
+                            while (pos < e) acorn.neighbors[pos++] = -1;
+                        }
+                        omp_unset_lock(&locks[other]);
+                    }
+                    omp_set_lock(&locks[pt_id]);
+
+                    acorn.nb_per_level[level]++;
+                }
+
+                omp_unset_lock(&locks[pt_id]);
+
+                // Update max_level / entry_point if needed
+                if (pt_level > acorn.max_level) {
+                    acorn.max_level = pt_level;
+                    acorn.entry_point = pt_id;
+                }
+            }
+        }
+        i1 = i0;
+    }
+
+    for (int i = 0; i < ntotal; i++) omp_destroy_lock(&locks[i]);
+}
+
 } // namespace acorn
+

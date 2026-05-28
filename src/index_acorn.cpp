@@ -14,14 +14,16 @@ namespace acorn {
 void IndexACORN::add(idx_t n, const float* x) {
     assert(is_trained);
     int n0 = ntotal;
-    if (n > 0) {
-        codes.resize((ntotal + n) * code_size);
-        memcpy(codes.data() + ntotal * code_size, x, n * code_size);
-        ntotal += n;
-    }
-    // Note: graph construction not implemented in this clean version.
-    // For now, we only support loading pre-built indices.
-    (void)n0;
+    if (n == 0) return;
+
+    // Store vectors
+    codes.resize((ntotal + n) * code_size);
+    memcpy(codes.data() + ntotal * code_size, x, n * code_size);
+    ntotal += n;
+
+    // Build graph
+    acorn_build(acorn, n0, n, get_xb(), d,
+                (metric_type == METRIC_INNER_PRODUCT) ? 0 : 1, verbose);
 }
 
 void IndexACORN::reset() {

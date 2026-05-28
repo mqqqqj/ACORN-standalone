@@ -91,6 +91,10 @@ struct ACORN {
                                int filter = -1, Operation op = EQUAL) const;
 };
 
+// Build ACORN graph for new vertices
+void acorn_build(ACORN& acorn, int n0, int n, const float* xb,
+                 int d, int metric, bool verbose);
+
 // Simple global stats
 struct ACORNStats {
     size_t n1, n2, n3, ndis, nreorder;
