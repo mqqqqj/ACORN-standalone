@@ -37,9 +37,6 @@ target_include_directories(acorn
 target_link_libraries(acorn PUBLIC OpenMP::OpenMP_CXX)
 
 # Examples
-add_executable(example examples/simple_example.cpp)
-target_link_libraries(example acorn)
-
 add_executable(eval_sift1m examples/eval_sift1m.cpp)
 target_link_libraries(eval_sift1m acorn)
 
