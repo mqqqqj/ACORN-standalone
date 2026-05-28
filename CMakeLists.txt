@@ -10,7 +10,6 @@ find_package(OpenMP REQUIRED)
 
 # ACORN library
 set(ACORN_SOURCES
-    src/index.cpp
     src/acorn_graph.cpp
     src/index_acorn.cpp
     src/random.cpp
@@ -20,11 +19,8 @@ set(ACORN_SOURCES
 
 set(ACORN_HEADERS
     include/acorn/types.h
-    include/acorn/visited.h
     include/acorn/distance.h
-    include/acorn/heap.h
     include/acorn/random.h
-    include/acorn/index.h
     include/acorn/acorn_graph.h
     include/acorn/index_acorn.h
     include/acorn/file_io.h
@@ -58,10 +54,5 @@ target_link_libraries(test_parallel acorn)
 
 add_executable(compute_filtered_gt examples/compute_filtered_gt.cpp)
 target_link_libraries(compute_filtered_gt acorn)
-
-# Optionally build tests
-option(BUILD_TESTS "Build tests" OFF)
-if(BUILD_TESTS)
-    enable_testing()
-    # add_subdirectory(tests)
-endif()
+add_executable(debug_search examples/debug_search.cpp)
+target_link_libraries(debug_search acorn)
