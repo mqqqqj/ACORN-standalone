@@ -330,6 +330,12 @@ int ACORN::parallel_search(const float* query, const float* xb, int d, int metri
                        SearchNeighbor(nearest, d_nearest, false));
 
     std::vector<std::pair<float, int>> batch;
+    // Add nearest to batch so it gets expanded in round 1
+    // (needed when nearest has no filtered direct neighbors at level 0,
+    //  but 2-hop expansion via ACORN hybrid logic can reach them)
+    if (!filter_map || filter_map[nearest])
+        batch.emplace_back(d_nearest, nearest);
+
     size_t begin, end;
     neighbor_range(nearest, 0, &begin, &end);
     for (size_t j = begin; j < end; j++) {
