@@ -1,35 +1,69 @@
-# ACORN-standalone: Approximate Nearest Neighbor Search with Attribute Filters
+# ACORN: Approximate Nearest Neighbor Search with Attribute Filters
 
-> **ACORN** was originally proposed by the [guestrin-lab/ACORN](https://github.com/guestrin-lab/ACORN) project and implemented as part of the [FAISS](https://github.com/facebookresearch/faiss) vector search library. This repository extracts the ACORN index into a **standalone** C++ library with no dependency on FAISS, making it easier to understand, modify, and benchmark the ACORN algorithm in isolation.
+ACORN is a graph-based approximate nearest neighbor (ANN) search library supporting
+**predicate-filtered hybrid search** — filtering by discrete attribute during the
+graph traversal itself, not as a post-processing step.
 
-ACORN is a high-performance C++ library for approximate nearest neighbor (ANN) search over large-scale vector datasets. It builds a graph-based proximity index and supports **hybrid search** — filtering results by discrete attribute values during the ANN traversal itself, rather than as a post-processing step.
+Originally part of [FAISS](https://github.com/facebookresearch/faiss), this is a
+**standalone** extraction with zero external dependencies beyond the C++ standard
+library and OpenMP.
 
 ## How It Works
 
-ACORN constructs a layered navigable graph (similar in spirit to HNSW), then applies a **predicate-guided pruning strategy** during both construction and search. Each vector is associated with an integer metadata label. The pruning strategy:
+ACORN builds a layered navigable graph and applies a **predicate-guided pruning
+strategy** during both construction and search. Each vector has an integer label.
+The algorithm:
 
-- Prioritizes edges to nodes sharing the same attribute, ensuring the filtered subgraph remains well-connected.
-- Expands candidate neighborhoods by looking at neighbors-of-neighbors when the immediate neighborhood has insufficient matches.
-- Uses a `gamma` parameter to control the trade-off between raw search speed and filtered recall.
+- Prioritizes edges to nodes with the same label, keeping the filtered subgraph connected.
+- Expands to neighbors-of-neighbors when immediate neighbors have insufficient label matches.
+- Uses a `gamma` parameter to trade off index size vs. filtered recall.
 
-This design means ACORN achieves high recall under attribute filters without needing to build separate per-attribute indices.
+Three search modes are provided:
 
-## Features
-
-- **Hybrid vector + predicate search** — filter by integer attribute at query time
-- **L2 and inner product** distance metrics
-- **SIMD-accelerated** distance computations (AVX2 + FMA)
-- **OpenMP-parallel** index construction
-- **Save/load** indices to disk
-- **Single-header-friendly** — the core library compiles to a static library with a clean public API
-- **SIFT1M-scale** evaluation harness included
+| Mode | Description |
+|------|-------------|
+| Serial | Single-threaded NSG-style backtracking with 2-hop expansion |
+| iQAN | Intra-query parallel: sync-and-redistribute, per-thread pool of `efs` candidates |
+| No-Sync | Intra-query parallel: threads search independently, merge at the end |
 
 ## Requirements
 
 - C++11 or later
 - CMake ≥ 3.10
 - OpenMP
-- x86-64 with AVX2 + FMA support
+- x86-64 with AVX2 + FMA
+
+## Project Structure
+
+```
+├── include/acorn/       # Public headers
+│   ├── acorn_graph.h    # ACORN index struct + all search methods
+│   ├── types.h          # MetricType, SearchNeighbor, InsertIntoPool
+│   ├── distance.h       # L2 / inner product with SIMD
+│   ├── file_io.h        # fbin / ibin / groundtruth I/O
+│   └── random.h         # RandomGenerator (used during construction)
+├── src/                 # Library sources → libacorn.a
+│   ├── acorn_graph.cpp  # Build, search (serial / iQAN / no-sync), persistence
+│   ├── distances.cpp    # SIMD distance kernels
+│   ├── file_io.cpp      # Binary format I/O
+│   └── random.cpp       # Mersenne Twister wrapper
+├── examples/            # Standalone tools (all CLI-driven, no hardcoded paths)
+│   ├── build.cpp        # Build an index from base vectors + labels
+│   ├── search.cpp       # Serial + iQAN + No-Sync search with recall evaluation
+│   ├── gen_labels.cpp   # Generate random labels for a dataset
+│   ├── compute_groundtruth.cpp      # Brute-force L2 ground truth
+│   ├── compute_filtered_gt.cpp      # Brute-force filtered L2 ground truth
+│   └── debug_search.cpp # Quick small-scale build + search for debugging
+├── scripts/             # Convenience shell scripts (defaults target SIFT1M)
+│   ├── build.sh         # Build index
+│   ├── search.sh        # Search evaluation
+│   ├── gen_labels.sh    # Generate labels
+│   ├── compute_gt.sh    # Compute ground truth
+│   ├── compute_filtered_gt.sh  # Compute filtered ground truth
+│   ├── debug.sh         # Quick debug run
+│   └── run_all.sh       # End-to-end pipeline
+└── data/                # Pre-built SIFT1M index, labels, and ground truth
+```
 
 ## Build
 
@@ -39,38 +73,103 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
 
-This produces `libacorn.a` and the example binaries.
+Binaries are placed in `build/`:
+`build_index`, `search`, `gen_labels`, `compute_groundtruth`,
+`compute_filtered_gt`, `debug_search`.
 
 ## Quick Start
 
 ```cpp
-#include "acorn/index_acorn.h"
+#include "acorn/acorn_graph.h"
+#include "acorn/file_io.h"
 
-// Generate 10000 random 64-dimensional vectors
-int n = 10000, d = 64;
-std::vector<float> data(n * d);
-// ... fill data ...
+int main()
+{
+    int n = 10000, d = 64;
 
-// Attach random metadata (10 categories)
-std::vector<int> metadata(n);
-for (int i = 0; i < n; i++) metadata[i] = i % 10;
+    // Generate random labels
+    std::vector<int> labels(n);
+    for (int i = 0; i < n; i++) labels[i] = i % 10;
 
-// Build index
-acorn::IndexACORNFlat index(d, /*M=*/32, /*gamma=*/12, metadata, /*M_beta=*/32);
-index.add(n, data.data());
+    // Build index
+    acorn::ACORN index(d, /*M=*/32, /*gamma=*/12, labels, /*M_beta=*/32, acorn::METRIC_L2);
+    index.efConstruction = 200;
+    // ... fill float vectors into base[n*d] ...
+    index.add(n, base);
 
-// Search: top-10 nearest to query
-std::vector<acorn::idx_t> labels(10);
-std::vector<float> distances(10);
-acorn::SearchParametersACORN params;
-params.efSearch = 64;
-index.search(1, query.data(), 10, distances.data(), labels.data(), &params);
+    // Save
+    index.save("acorn.index");
+
+    // Load
+    acorn::ACORN idx2;
+    idx2.load("acorn.index");
+
+    // Serial search: 1 query, top-10
+    std::vector<int> labs(10);
+    std::vector<float> dists(10);
+    int metric = 1;  // L2
+    idx2.search(query, idx2.get_xb(), idx2.d, metric, 10, 64,
+                labs.data(), dists.data());
+
+    // Filtered search (only label == 3)
+    std::vector<char> filter(n, 0);
+    for (int i = 0; i < n; i++)
+        if (labels[i] == 3) filter[i] = 1;
+    idx2.search(query, idx2.get_xb(), idx2.d, metric, 10, 64,
+                labs.data(), dists.data(), filter.data());
+
+    // iQAN parallel search (4 threads, efs=100)
+    idx2.iqan_search(query, idx2.get_xb(), idx2.d, metric, 10, 100,
+                     labs.data(), dists.data(), 4, 100, filter.data());
+
+    // No-sync parallel search (4 threads)
+    idx2.no_sync_search(query, idx2.get_xb(), idx2.d, metric, 10, 100,
+                        labs.data(), dists.data(), 4, filter.data());
+}
 ```
 
-Run the included example:
+## CLI Tools
+
+All tools accept `--help` for usage. No file paths are hardcoded.
+
+### Build Index
 
 ```bash
-./example --n 100000 --d 128 --k 10 --M 32 --gamma 12 --ef 64
+./build_index --base sift_base.fbin --labels labels.ibin --output acorn.index \
+              --M 32 --gamma 12 --efc 200 --metric l2
+```
+
+### Search & Evaluate
+
+```bash
+# Unfiltered, no ground truth
+./search --index acorn.index --query queries.fbin --k 100 --ef 200 --nq 1000
+
+# Filtered with recall evaluation
+./search --index acorn.index --query queries.fbin \
+         --labels labels.ibin --qlabels query_labels.ibin \
+         --gt gt_filtered.ibin --k 100 --ef 400 --threads 4 --efs 100 --nq 1000
+```
+
+### SIFT1M Pipeline
+
+```bash
+# One-shot (skips GT if already computed, skips build if index exists)
+SKIP_GT=1 SKIP_BUILD=1 ./scripts/run_all.sh
+
+# Or step by step
+./scripts/gen_labels.sh
+./scripts/compute_gt.sh
+./scripts/compute_filtered_gt.sh
+./scripts/build.sh
+./scripts/search.sh
+```
+
+Default paths target the SIFT1M dataset in `/dataset/SIFT1M/`. Override with
+environment variables:
+
+```bash
+BASE=/data/my_base.fbin QUERY=/data/my_query.fbin OUTPUT=./my.index ./scripts/build.sh
 ```
 
 ## Key Parameters
@@ -78,45 +177,20 @@ Run the included example:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `M` | Base graph degree | 32 |
-| `gamma` | Pruning multiplier — higher values improve filtered recall at the cost of index size | 12 |
-| `M_beta` | Number of same-attribute edges to prioritize during pruning | M |
-| `efConstruction` | Search depth during construction — higher = more accurate but slower build | M × gamma |
-| `efSearch` | Search depth at query time — higher = more accurate but slower | 16 |
-
-## Hybrid Search (with Attribute Filters)
-
-```cpp
-// Build a filter map: only consider vectors with metadata == 3
-std::vector<char> filter_map(n, 0);
-for (int i = 0; i < n; i++) {
-    if (metadata[i] == 3) filter_map[i] = 1;
-}
-
-// Hybrid search
-index.search(nq, queries.data(), k, distances.data(), labels.data(),
-             filter_map.data(), &params);
-```
-
-## SIFT1M Evaluation
-
-The `eval_sift1m` example provides a full evaluation pipeline on the SIFT1M benchmark:
-
-```bash
-./eval_sift1m \
-    --base   /dataset/SIFT1M/sift_base.fbin \
-    --query  /dataset/SIFT1M/sift_query.fbin \
-    --labels labels.ibin \
-    --gt     sift1m_gt_top100.ibin \
-    --M 32 --gamma 12 --efc 200
-```
-
-It reports Recall@100 and QPS across a range of `efSearch` values.
+| `gamma` | Pruning multiplier — higher improves filtered recall | 12 |
+| `M_beta` | Same-label edges to prioritize before 2-hop expansion | M |
+| `efConstruction` | Search depth during construction | M × gamma |
+| `ef` | Search depth for serial query | 200 |
+| `efs` | Pool size per thread in parallel search | 100 |
+| `threads` | Number of parallel search threads | 4 |
 
 ## File Formats
 
-- **fbin**: Little-endian binary with `int32_t(n_vectors)`, `int32_t(dimension)`, then `float32` vector data.
-- **ibin**: Little-endian binary with `int32_t(count)`, then `int32_t` label data.
+- **fbin**: 4-byte `int32_t(n)` + 4-byte `int32_t(d)` + `n×d` × `float32` (row-major, LE)
+- **ibin**: 4-byte `int32_t(count)` + `count` × `int32_t` (LE)
+- **Ground truth** (ibin variant): 4-byte `int32_t(nq)` + 4-byte `int32_t(k)` + `nq×k` × `int32_t` (LE)
+- **ACORN index**: custom binary with magic `ACRN` followed by header, vectors, labels, and graph data
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).

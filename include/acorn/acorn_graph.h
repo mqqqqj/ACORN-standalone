@@ -27,21 +27,31 @@ struct ACORN {
 
     int gamma, M, M_beta, max_level;
     int efConstruction, efSearch;
-    bool check_relative_distance;
-    int upper_beam;
 
-    // Metadata for hybrid search
+    // Metadata for hybrid search (points to metadata_storage.data())
     const int* metadata;
 
-    // --- Construction ---
+    // --- Index data (from old IndexACORN) ---
+    int d = 0;
+    idx_t ntotal = 0;
+    MetricType metric_type = METRIC_L2;
+    bool verbose = false;
+    size_t code_size = 0;
+    std::vector<uint8_t> codes;
+    std::vector<int> metadata_storage;
+
+    // --- Constructors ---
     ACORN() : entry_point(-1), rng(12345),
               gamma(0), M(0), M_beta(0), max_level(-1),
               efConstruction(0), efSearch(16),
-              check_relative_distance(true), upper_beam(1),
               metadata(nullptr) { offsets.push_back(0); }
 
     explicit ACORN(int M, int gamma, std::vector<int>& metadata, int M_beta);
 
+    ACORN(int d, int M, int gamma, std::vector<int>& metadata,
+          int M_beta, MetricType metric = METRIC_L2);
+
+    // --- Graph-level methods ---
     void set_default_probas(int M, float levelMult, int M_beta, int gamma = 1);
     int random_level();
     int nb_neighbors(int layer_no) const;
@@ -50,60 +60,41 @@ struct ACORN {
     int prepare_level_tab(size_t n, bool preset_levels = false);
     void reset();
 
-    // --- Search (NSG-style sorted pool) ---
+    // --- Raw graph search (NSG-style sorted pool) ---
     // xb = base vectors, d = dimension, metric: 0=IP, 1=L2
     int search(const float* query, const float* xb, int d, int metric,
                int k, int efSearch_val,
                int* indices, float* distances,
                const char* filter_map = nullptr) const;
 
-    // --- Parallel search ---
-    int parallel_search(const float* query, const float* xb, int d, int metric,
-                        int k, int efSearch_val,
-                        int* indices, float* distances,
-                        int num_threads, int efs,
-                        const char* filter_map = nullptr) const;
+    // --- iQAN search (sync-and-redistribute) ---
+    int iqan_search(const float* query, const float* xb, int d, int metric,
+                    int k, int efSearch_val,
+                    int* indices, float* distances,
+                    int num_threads, int efs,
+                    const char* filter_map = nullptr) const;
 
-    // --- Save / Load ---
-    void save(FILE* fp) const;
-    void load(FILE* fp);
+    // --- No-sync parallel search ---
+    int no_sync_search(const float* query, const float* xb, int d, int metric,
+                       int k, int efSearch_val,
+                       int* indices, float* distances,
+                       int num_threads,
+                       const char* filter_map = nullptr) const;
 
-    // --- Construction helpers ---
-    void shrink_neighbor_list(const float* query, int q_id,
-                              std::vector<std::pair<float, int>>& candidates,
-                              int max_size, int gamma_val);
-    int search_neighbors_to_add(const float* query, int entry,
-                                float d_entry, int level,
-                                std::vector<uint8_t>& visited, int vis_mark,
-                                std::vector<std::pair<float, int>>& results,
-                                int ef);
-    void add_links_starting_from(const float* query, int pt_id,
-                                  int nearest, float d_nearest, int level,
-                                  omp_lock_t* locks,
-                                  std::vector<uint8_t>& visited, int vis_mark);
-    void add_with_locks(const float* query, int pt_level, int pt_id,
-                        std::vector<omp_lock_t>& locks,
-                        std::vector<uint8_t>& visited, int vis_mark);
+    // --- Build / persistence ---
+    void add(idx_t n, const float* x);
+    void save(const char* filename) const;
+    void load(const char* filename);
 
-    // --- Stats ---
-    void print_neighbor_stats(int level) const;
-    void print_neighbor_stats(bool edge_list, bool filtered = false,
-                               int filter = -1, Operation op = EQUAL) const;
+    // --- Access ---
+    float* get_xb() { return (float*)codes.data(); }
+    const float* get_xb() const { return (const float*)codes.data(); }
 };
 
-// Build ACORN graph for new vertices
-void acorn_build(ACORN& acorn, int n0, int n, const float* xb,
-                 int d, int metric, bool verbose);
-
-// Simple global stats
-struct ACORNStats {
-    size_t n1, n2, n3, ndis, nreorder;
-    ACORNStats() : n1(0), n2(0), n3(0), ndis(0), nreorder(0) {}
-    void combine(const ACORNStats& o) {
-        n1 += o.n1; n2 += o.n2; n3 += o.n3;
-        ndis += o.ndis; nreorder += o.nreorder;
-    }
-};
-extern ACORNStats acorn_stats;
+// Per-thread NDC profiling
+void reset_thread_ndis(int num_threads);
+void reset_ser_ndis();
+const std::vector<size_t>& get_thread_ndis();
+size_t get_ser_ndis();
 
 } // namespace acorn

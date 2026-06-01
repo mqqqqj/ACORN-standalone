@@ -11,7 +11,6 @@ find_package(OpenMP REQUIRED)
 # ACORN library
 set(ACORN_SOURCES
     src/acorn_graph.cpp
-    src/index_acorn.cpp
     src/random.cpp
     src/distances.cpp
     src/file_io.cpp
@@ -22,7 +21,6 @@ set(ACORN_HEADERS
     include/acorn/distance.h
     include/acorn/random.h
     include/acorn/acorn_graph.h
-    include/acorn/index_acorn.h
     include/acorn/file_io.h
 )
 
@@ -37,19 +35,19 @@ target_include_directories(acorn
 target_link_libraries(acorn PUBLIC OpenMP::OpenMP_CXX)
 
 # Examples
-add_executable(eval_sift1m examples/eval_sift1m.cpp)
-target_link_libraries(eval_sift1m acorn)
-
 add_executable(gen_labels examples/gen_labels.cpp)
 target_link_libraries(gen_labels acorn)
 
 add_executable(compute_groundtruth examples/compute_groundtruth.cpp)
 target_link_libraries(compute_groundtruth acorn)
 
-add_executable(test_parallel examples/test_parallel.cpp)
-target_link_libraries(test_parallel acorn)
-
 add_executable(compute_filtered_gt examples/compute_filtered_gt.cpp)
 target_link_libraries(compute_filtered_gt acorn)
 add_executable(debug_search examples/debug_search.cpp)
 target_link_libraries(debug_search acorn)
+
+add_executable(build_index examples/build.cpp)
+target_link_libraries(build_index acorn)
+
+add_executable(search examples/search.cpp)
+target_link_libraries(search acorn)

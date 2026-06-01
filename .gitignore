@@ -2,7 +2,6 @@
 build/
 data/
 cmake-build-*/
-nsg/
 
 # Compiled output
 *.o
