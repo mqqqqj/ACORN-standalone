@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
+#include <mutex>
 #include <unordered_set>
 #include <sys/time.h>
 
@@ -170,36 +172,6 @@ namespace acorn
         const ACORN &hnsw, const float *query, const float *xb, int d, int metric,
         const char *filter_map, int level, int &nearest, float &d_nearest)
     {
-        if (!filter_map)
-        {
-            // non-filter: simple greedy descent, check up to M neighbors
-            for (;;)
-            {
-                int prev = nearest;
-                size_t begin, end;
-                hnsw.neighbor_range(nearest, level, &begin, &end);
-                int numIters = 0;
-                for (size_t i = begin; i < end; i++)
-                {
-                    int v = hnsw.neighbors[i];
-                    if (v < 0)
-                        break;
-                    numIters++;
-                    if (numIters > hnsw.M)
-                        break;
-                    float dist_v = compute_dist(query, xb, d, metric, v);
-                    if (dist_v < d_nearest)
-                    {
-                        d_nearest = dist_v;
-                        nearest = v;
-                    }
-                }
-                if (nearest == prev)
-                    return;
-            }
-        }
-
-        // filter search: gamma-aware greedy descent with 2-hop expansion for gamma==1
         for (;;)
         {
             int num_found = 0;
@@ -266,6 +238,99 @@ namespace acorn
         }
     }
 
+    template <typename VisitedT, typename DistFn>
+    static inline int expand_level0_filtered(
+        const ACORN &hnsw,
+        int cur,
+        SearchNeighbor *pool,
+        int &pool_size,
+        int L,
+        VisitedT &visited,
+        const char *filter_map,
+        DistFn &&comp_dist,
+        size_t *ndis_local = nullptr)
+    {
+        if (!pool[cur].expanded)
+            return pool_size;
+
+        pool[cur].expanded = false;
+        int next_cur = pool_size;
+        size_t begin, end;
+        hnsw.neighbor_range(pool[cur].id, 0, &begin, &end);
+
+        int num_found = 0;
+        bool keep_expanding = true;
+        int neighbor_idx = 0;
+
+        for (size_t j = begin; j < end; j++, neighbor_idx++)
+        {
+            int v1 = hnsw.neighbors[j];
+            if (v1 < 0)
+                break;
+
+            if (filter_map[v1])
+                num_found++;
+
+            if (!visited[v1] && filter_map[v1])
+            {
+                visited[v1] = true;
+                float dv = comp_dist(v1);
+                if (ndis_local)
+                    (*ndis_local)++;
+                if (pool_size < L || dv < pool[L - 1].distance)
+                {
+                    int r = InsertIntoPool(pool, pool_size, L,
+                                           SearchNeighbor(v1, dv, true));
+                    if (r < next_cur)
+                        next_cur = r;
+                }
+                if (num_found >= hnsw.M * 2)
+                {
+                    keep_expanding = false;
+                    break;
+                }
+            }
+
+            if ((neighbor_idx >= hnsw.M_beta && keep_expanding) || hnsw.gamma == 1)
+            {
+                size_t b2, e2;
+                hnsw.neighbor_range(v1, 0, &b2, &e2);
+                for (size_t j2 = b2; j2 < e2; j2++)
+                {
+                    int v2 = hnsw.neighbors[j2];
+                    if (v2 < 0)
+                        break;
+
+                    if (filter_map[v2])
+                        num_found++;
+                    else
+                        continue;
+
+                    if (visited[v2])
+                        continue;
+                    visited[v2] = true;
+                    float d2 = comp_dist(v2);
+                    if (ndis_local)
+                        (*ndis_local)++;
+                    if (pool_size < L || d2 < pool[L - 1].distance)
+                    {
+                        int r = InsertIntoPool(pool, pool_size, L,
+                                               SearchNeighbor(v2, d2, true));
+                        if (r < next_cur)
+                            next_cur = r;
+                    }
+                    if (num_found >= hnsw.M * 2)
+                    {
+                        keep_expanding = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return next_cur;
+    }
+
     // ============================================================
     // NSG-style search
     // ============================================================
@@ -284,6 +349,8 @@ namespace acorn
         int ntotal = (int)(offsets.size() - 1);
         if (ntotal <= 0)
             return 0;
+        if (!filter_map)
+            return 0;
 
         std::vector<SearchNeighbor> pool(L + 1);
         int pool_size = 0;
@@ -297,7 +364,7 @@ namespace acorn
 
         // Phase 2: init pool with nearest and its level-0 neighbors
         visited[nearest] = true;
-        if (!filter_map || filter_map[nearest])
+        if (filter_map[nearest])
             InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(nearest, d_nearest, true));
 
         size_t begin, end;
@@ -307,7 +374,7 @@ namespace acorn
             int v = neighbors[j];
             if (v < 0)
                 break;
-            if (filter_map && !filter_map[v])
+            if (!filter_map[v])
                 continue;
             if (visited[v])
                 continue;
@@ -316,105 +383,13 @@ namespace acorn
             InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(v, dv, true));
         }
 
-        // Backtrack search loop (NSG style: track earliest insertion for backtrack)
         int cur = 0;
         while (cur < pool_size)
         {
-            int next_cur = pool_size; // default: no backtrack
-            auto &cur_nb = pool[cur];
-            if (cur_nb.expanded)
-            {
-                cur_nb.expanded = false;
-                neighbor_range(cur_nb.id, 0, &begin, &end);
-
-                if (!filter_map)
-                {
-                    for (size_t j = begin; j < end; j++)
-                    {
-                        int v = neighbors[j];
-                        if (v < 0)
-                            break;
-                        if (visited[v])
-                            continue;
-                        visited[v] = true;
-                        float dv = compute_dist(query, xb, d, metric, v);
-                        if (pool_size == L && dv >= pool[L - 1].distance)
-                            continue;
-                        int r = InsertIntoPool(pool.data(), pool_size, L,
-                                               SearchNeighbor(v, dv, true));
-                        if (r < next_cur)
-                            next_cur = r;
-                    }
-                }
-                else
-                {
-                    int num_found = 0;
-                    bool keep_expanding = true;
-                    int neighbor_idx = 0;
-
-                    for (size_t j = begin; j < end; j++, neighbor_idx++)
-                    {
-                        int v1 = neighbors[j];
-                        if (v1 < 0)
-                            break;
-
-                        if (filter_map[v1])
-                            num_found++;
-
-                        if (!visited[v1] && filter_map[v1])
-                        {
-                            visited[v1] = true;
-                            float dv = compute_dist(query, xb, d, metric, v1);
-                            if (pool_size < L || dv < pool[L - 1].distance)
-                            {
-                                int r = InsertIntoPool(pool.data(), pool_size, L,
-                                                       SearchNeighbor(v1, dv, true));
-                                if (r < next_cur)
-                                    next_cur = r;
-                            }
-                            if (num_found >= M * 2)
-                            {
-                                keep_expanding = false;
-                                break;
-                            }
-                        }
-
-                        if ((neighbor_idx >= M_beta && keep_expanding) || gamma == 1)
-                        {
-                            size_t b2, e2;
-                            neighbor_range(v1, 0, &b2, &e2);
-                            for (size_t j2 = b2; j2 < e2; j2++)
-                            {
-                                int v2 = neighbors[j2];
-                                if (v2 < 0)
-                                    break;
-
-                                if (filter_map[v2])
-                                    num_found++;
-                                else
-                                    continue;
-
-                                if (visited[v2])
-                                    continue;
-                                visited[v2] = true;
-                                float d2 = compute_dist(query, xb, d, metric, v2);
-                                if (pool_size < L || d2 < pool[L - 1].distance)
-                                {
-                                    int r = InsertIntoPool(pool.data(), pool_size, L,
-                                                           SearchNeighbor(v2, d2, true));
-                                    if (r < next_cur)
-                                        next_cur = r;
-                                }
-                                if (num_found >= M * 2)
-                                {
-                                    keep_expanding = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            int next_cur = expand_level0_filtered(
+                *this, cur, pool.data(), pool_size, L, visited, filter_map,
+                [&](int v)
+                { return compute_dist(query, xb, d, metric, v); });
             if (next_cur <= cur)
                 cur = next_cur;
             else
@@ -431,14 +406,13 @@ namespace acorn
     }
 
     // ============================================================
-    // iQAN search (sync-and-redistribute, NSG clean)
+    // iQAN search (sync-and-redistribute)
     // ============================================================
 
     int ACORN::iqan_search(const float *query, const float *xb, int d, int metric,
                            int k, int efSearch_val,
                            int *indices, float *distances,
-                           int num_threads, int efs,
-                           const char *filter_map) const
+                           int num_threads, const char *filter_map) const
     {
         if (entry_point == -1)
             return 0;
@@ -453,20 +427,16 @@ namespace acorn
 
         auto comp_dist = [&](int v)
         { return compute_dist(query, xb, d, metric, v); };
-        auto now_ms = []()
-        { timeval tv; gettimeofday(&tv,0); return tv.tv_sec*1000.0+tv.tv_usec/1000.0; };
-        double t_start = now_ms();
 
         // Phase 1: greedy descent
         int nearest = entry_point;
         float d_nearest = comp_dist(nearest);
         for (int lvl = max_level; lvl >= 1; lvl--)
             greedy_update(*this, query, xb, d, metric, filter_map, lvl, nearest, d_nearest);
-        double t_phase1 = now_ms() - t_start;
 
         // Phase 2: init
         visited[nearest] = true;
-        if (!filter_map || filter_map[nearest])
+        if (filter_map[nearest])
             InsertIntoPool(shared_pool.data(), shared_size, L,
                            SearchNeighbor(nearest, d_nearest, false));
 
@@ -474,7 +444,7 @@ namespace acorn
         // Add nearest to batch so it gets expanded in round 1
         // (needed when nearest has no filtered direct neighbors at level 0,
         //  but 2-hop expansion via ACORN hybrid logic can reach them)
-        if (!filter_map || filter_map[nearest])
+        if (filter_map[nearest])
             batch.emplace_back(d_nearest, nearest);
 
         size_t begin, end;
@@ -484,7 +454,7 @@ namespace acorn
             int v = neighbors[j];
             if (v < 0)
                 break;
-            if (filter_map && !filter_map[v])
+            if (!filter_map[v])
                 continue;
             if (visited[v])
                 continue;
@@ -494,133 +464,40 @@ namespace acorn
             InsertIntoPool(shared_pool.data(), shared_size, L,
                            SearchNeighbor(v, dv, false));
         }
-        double t_phase2 = now_ms() - t_start;
 
         // Phase 3: parallel rounds
-        double t_parallel = 0, t_sync = 0;
         std::vector<size_t> thread_ndis(num_threads, 0);
         while (!batch.empty())
         {
-            int to_process = std::min(num_threads * efs, (int)batch.size());
-            int per_thread = (to_process + num_threads - 1) / num_threads;
+            int to_process = std::min(num_threads * L, (int)batch.size());
             std::vector<std::vector<std::pair<float, int>>> thread_unexpanded(num_threads);
+            std::vector<std::vector<std::pair<float, int>>> thread_work(num_threads);
+            for (int i = 0; i < to_process; i++)
+                thread_work[i % num_threads].push_back(batch[i]);
 
-            double t_round = now_ms();
 #pragma omp parallel num_threads(num_threads)
             {
                 int tid = omp_get_thread_num();
                 size_t ndis_local = 0;
-                std::vector<SearchNeighbor> local_pool(efs + 1);
+                std::vector<SearchNeighbor> local_pool(L + 1);
                 int local_size = 0;
-                int start = tid * per_thread;
-                int end = std::min(start + per_thread, to_process);
-                for (int i = start; i < end; i++)
+                for (auto &p : thread_work[tid])
                 {
-                    auto &p = batch[i];
-                    if (filter_map && !filter_map[p.second])
+                    if (!filter_map[p.second])
                         continue;
-                    InsertIntoPool(local_pool.data(), local_size, efs,
+                    InsertIntoPool(local_pool.data(), local_size, L,
                                    SearchNeighbor(p.second, p.first, true));
                 }
 
                 int cur = 0, step = 0;
-                while (cur < local_size && step < efs)
+                while (cur < local_size && step < L)
                 {
-                    int next_cur = local_size;
-                    auto &cn = local_pool[cur];
-                    if (cn.expanded)
-                    {
-                        cn.expanded = false;
+                    bool was_expanded = local_pool[cur].expanded;
+                    int next_cur = expand_level0_filtered(
+                        *this, cur, local_pool.data(), local_size, L, visited, filter_map,
+                        comp_dist, &ndis_local);
+                    if (was_expanded)
                         step++;
-                        size_t b, e;
-                        neighbor_range(cn.id, 0, &b, &e);
-
-                        if (!filter_map)
-                        {
-                            for (size_t j = b; j < e; j++)
-                            {
-                                int v = neighbors[j];
-                                if (v < 0)
-                                    break;
-                                if (visited[v])
-                                    continue;
-                                visited[v] = true;
-                                float dv = comp_dist(v);
-                                ndis_local++;
-                                if (local_size == efs && dv >= local_pool[efs - 1].distance)
-                                    continue;
-                                int r = InsertIntoPool(local_pool.data(), local_size, efs,
-                                                       SearchNeighbor(v, dv, true));
-                                if (r < next_cur)
-                                    next_cur = r;
-                            }
-                        }
-                        else
-                        {
-                            int num_found = 0;
-                            bool keep_expanding = true;
-                            int neighbor_idx = 0;
-                            for (size_t j = b; j < e; j++, neighbor_idx++)
-                            {
-                                int v1 = neighbors[j];
-                                if (v1 < 0)
-                                    break;
-                                if (filter_map[v1])
-                                    num_found++;
-                                if (!visited[v1] && filter_map[v1])
-                                {
-                                    visited[v1] = true;
-                                    float dv = comp_dist(v1);
-                                    ndis_local++;
-                                    if (local_size < efs || dv < local_pool[efs - 1].distance)
-                                    {
-                                        int r = InsertIntoPool(local_pool.data(), local_size, efs,
-                                                               SearchNeighbor(v1, dv, true));
-                                        if (r < next_cur)
-                                            next_cur = r;
-                                    }
-                                    if (num_found >= M * 2)
-                                    {
-                                        keep_expanding = false;
-                                        break;
-                                    }
-                                }
-                                if ((neighbor_idx >= M_beta && keep_expanding) || gamma == 1)
-                                {
-                                    size_t b2, e2;
-                                    neighbor_range(v1, 0, &b2, &e2);
-                                    for (size_t j2 = b2; j2 < e2; j2++)
-                                    {
-                                        int v2 = neighbors[j2];
-                                        if (v2 < 0)
-                                            break;
-                                        if (filter_map[v2])
-                                            num_found++;
-                                        else
-                                            continue;
-                                        if (!visited[v2])
-                                        {
-                                            visited[v2] = true;
-                                            float d2 = comp_dist(v2);
-                                            ndis_local++;
-                                            if (local_size < efs || d2 < local_pool[efs - 1].distance)
-                                            {
-                                                int r = InsertIntoPool(local_pool.data(), local_size, efs,
-                                                                       SearchNeighbor(v2, d2, true));
-                                                if (r < next_cur)
-                                                    next_cur = r;
-                                            }
-                                        }
-                                        if (num_found >= M * 2)
-                                        {
-                                            keep_expanding = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
                     if (next_cur <= cur)
                         cur = next_cur;
                     else
@@ -638,23 +515,21 @@ namespace acorn
                     InsertIntoPool(shared_pool.data(), shared_size, L,
                                    SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
             }
-            t_parallel += now_ms() - t_round;
 
-            double t_sync_start = now_ms();
             batch.erase(batch.begin(), batch.begin() + to_process);
             std::vector<std::pair<float, int>> all_unexpanded;
             for (int t = 0; t < num_threads; t++)
                 for (auto &p : thread_unexpanded[t])
-                    if (!filter_map || filter_map[p.second])
+                    if (filter_map[p.second])
                         all_unexpanded.push_back(p);
 
             if (!all_unexpanded.empty())
             {
-                if ((int)all_unexpanded.size() > efs)
+                if ((int)all_unexpanded.size() > L)
                 {
                     std::nth_element(all_unexpanded.begin(),
-                                     all_unexpanded.begin() + efs, all_unexpanded.end());
-                    all_unexpanded.resize(efs);
+                                     all_unexpanded.begin() + L, all_unexpanded.end());
+                    all_unexpanded.resize(L);
                 }
                 for (auto &p : all_unexpanded)
                     batch.push_back(p);
@@ -671,7 +546,6 @@ namespace acorn
                 if (min_d > shared_pool[shared_size - 1].distance)
                     batch.clear();
             }
-            t_sync += now_ms() - t_sync_start;
         }
 
         // Accumulate per-thread NDC for profiling
@@ -723,7 +597,7 @@ namespace acorn
         visited[nearest] = true;
 
         std::vector<std::pair<float, int>> batch;
-        if (!filter_map || filter_map[nearest])
+        if (filter_map[nearest])
             batch.emplace_back(d_nearest, nearest);
 
         size_t begin, end;
@@ -733,7 +607,7 @@ namespace acorn
             int v = neighbors[j];
             if (v < 0)
                 break;
-            if (filter_map && !filter_map[v])
+            if (!filter_map[v])
                 continue;
             if (visited[v])
                 continue;
@@ -745,9 +619,10 @@ namespace acorn
         if (batch.empty())
             return 0;
 
-        // Phase 3: partition batch, each thread searches to convergence
-        int batch_size = (int)batch.size();
-        int per_thread = (batch_size + num_threads - 1) / num_threads;
+        // Phase 3: round-robin distribute batch, each thread searches to convergence
+        std::vector<std::vector<std::pair<float, int>>> thread_batch(num_threads);
+        for (size_t i = 0; i < batch.size(); i++)
+            thread_batch[i % num_threads].push_back(batch[i]);
 
         std::vector<SearchNeighbor> shared_pool(L + 1);
         int shared_size = 0;
@@ -761,12 +636,9 @@ namespace acorn
             std::vector<SearchNeighbor> local_pool(L + 1);
             int local_size = 0;
 
-            int start = tid * per_thread;
-            int end = std::min(start + per_thread, batch_size);
-            for (int i = start; i < end; i++)
+            for (auto &p : thread_batch[tid])
             {
-                auto &p = batch[i];
-                if (filter_map && !filter_map[p.second])
+                if (!filter_map[p.second])
                     continue;
                 InsertIntoPool(local_pool.data(), local_size, L,
                                SearchNeighbor(p.second, p.first, true));
@@ -776,100 +648,9 @@ namespace acorn
             int cur = 0;
             while (cur < local_size)
             {
-                int next_cur = local_size;
-                auto &cn = local_pool[cur];
-                if (cn.expanded)
-                {
-                    cn.expanded = false;
-                    size_t b, e;
-                    neighbor_range(cn.id, 0, &b, &e);
-
-                    if (!filter_map)
-                    {
-                        for (size_t j = b; j < e; j++)
-                        {
-                            int v = neighbors[j];
-                            if (v < 0)
-                                break;
-                            if (visited[v])
-                                continue;
-                            visited[v] = true;
-                            float dv = comp_dist(v);
-                            ndis_local++;
-                            if (local_size == L && dv >= local_pool[L - 1].distance)
-                                continue;
-                            int r = InsertIntoPool(local_pool.data(), local_size, L,
-                                                   SearchNeighbor(v, dv, true));
-                            if (r < next_cur)
-                                next_cur = r;
-                        }
-                    }
-                    else
-                    {
-                        int num_found = 0;
-                        bool keep_expanding = true;
-                        int neighbor_idx = 0;
-                        for (size_t j = b; j < e; j++, neighbor_idx++)
-                        {
-                            int v1 = neighbors[j];
-                            if (v1 < 0)
-                                break;
-                            if (filter_map[v1])
-                                num_found++;
-                            if (!visited[v1] && filter_map[v1])
-                            {
-                                visited[v1] = true;
-                                float dv = comp_dist(v1);
-                                ndis_local++;
-                                if (local_size < L || dv < local_pool[L - 1].distance)
-                                {
-                                    int r = InsertIntoPool(local_pool.data(), local_size, L,
-                                                           SearchNeighbor(v1, dv, true));
-                                    if (r < next_cur)
-                                        next_cur = r;
-                                }
-                                if (num_found >= M * 2)
-                                {
-                                    keep_expanding = false;
-                                    break;
-                                }
-                            }
-                            if ((neighbor_idx >= M_beta && keep_expanding) || gamma == 1)
-                            {
-                                size_t b2, e2;
-                                neighbor_range(v1, 0, &b2, &e2);
-                                for (size_t j2 = b2; j2 < e2; j2++)
-                                {
-                                    int v2 = neighbors[j2];
-                                    if (v2 < 0)
-                                        break;
-                                    if (filter_map[v2])
-                                        num_found++;
-                                    else
-                                        continue;
-                                    if (!visited[v2])
-                                    {
-                                        visited[v2] = true;
-                                        float d2 = comp_dist(v2);
-                                        ndis_local++;
-                                        if (local_size < L || d2 < local_pool[L - 1].distance)
-                                        {
-                                            int r = InsertIntoPool(local_pool.data(), local_size, L,
-                                                                   SearchNeighbor(v2, d2, true));
-                                            if (r < next_cur)
-                                                next_cur = r;
-                                        }
-                                    }
-                                    if (num_found >= M * 2)
-                                    {
-                                        keep_expanding = false;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                int next_cur = expand_level0_filtered(
+                    *this, cur, local_pool.data(), local_size, L, visited, filter_map,
+                    comp_dist, &ndis_local);
                 if (next_cur <= cur)
                     cur = next_cur;
                 else
@@ -884,6 +665,164 @@ namespace acorn
                                SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
         }
 
+        if ((int)g_thread_ndis_total.size() < num_threads)
+            g_thread_ndis_total.resize(num_threads, 0);
+        for (int t = 0; t < num_threads; t++)
+            g_thread_ndis_total[t] += thread_ndis[t];
+
+        int out_n = std::min(k, shared_size);
+        for (int i = 0; i < out_n; i++)
+        {
+            indices[i] = shared_pool[i].id;
+            distances[i] = shared_pool[i].distance;
+        }
+        return out_n;
+    }
+
+    // ============================================================
+    // ScatterSearch (ICDE 2026) — decoupled parallel, leader-guided pruning
+    // ============================================================
+
+    int ACORN::scatter_search(const float *query, const float *xb, int d, int metric,
+                              int k, int efSearch_val,
+                              int *indices, float *distances,
+                              int num_threads, int Helec,
+                              const char *filter_map) const
+    {
+        if (entry_point == -1)
+            return 0;
+        if (num_threads <= 1)
+            return search(query, xb, d, metric, k, efSearch_val, indices, distances, filter_map);
+
+        int L = std::max(efSearch_val, k);
+        int ntotal = (int)(offsets.size() - 1);
+        if (ntotal <= 0)
+            return 0;
+
+        auto comp_dist = [&](int v)
+        { return compute_dist(query, xb, d, metric, v); };
+
+        // Phase 1: greedy descent to level 0, then collect filtered entry points
+        int nearest = entry_point;
+        float d_nearest = comp_dist(nearest);
+        for (int lvl = max_level; lvl >= 1; lvl--)
+            greedy_update(*this, query, xb, d, metric, filter_map, lvl, nearest, d_nearest);
+
+        std::vector<bool> visited(ntotal, false);
+        visited[nearest] = true;
+
+        std::vector<std::pair<float, int>> entry_points;
+        if (filter_map[nearest])
+            entry_points.emplace_back(d_nearest, nearest);
+
+        size_t begin, end;
+        neighbor_range(nearest, 0, &begin, &end);
+        for (size_t j = begin; j < end; j++)
+        {
+            int v = neighbors[j];
+            if (v < 0)
+                break;
+            if (!filter_map[v])
+                continue;
+            if (visited[v])
+                continue;
+            visited[v] = true;
+            entry_points.emplace_back(comp_dist(v), v);
+        }
+        if (entry_points.empty())
+            return 0;
+
+        std::vector<std::vector<std::pair<float, int>>> thread_entry_points(num_threads);
+
+        for (size_t i = 0; i < entry_points.size(); i++)
+        {
+            int tid = (int)(i % num_threads);
+            thread_entry_points[tid].push_back(entry_points[i]);
+        }
+
+        std::vector<SearchNeighbor> shared_pool(L + 1);
+        std::vector<size_t> thread_ndis(num_threads, 0);
+        std::mutex elec_mutex;
+        int best_thread_id = -1;
+        std::atomic<int> decide_num{0};
+        float epsilon = std::numeric_limits<float>::max();
+        std::atomic<bool> best_thread_finish{false};
+        std::vector<int> good_thread(num_threads, 0);
+        int election_hops = Helec;
+        int shared_size = 0;
+        if (L <= 50)
+            election_hops = std::max(1, L - 5);
+
+#pragma omp parallel num_threads(num_threads)
+        {
+            int tid = omp_get_thread_num();
+            size_t ndis_local = 0;
+            std::vector<SearchNeighbor> local_pool(L + 1);
+            int local_size = 0;
+            int hop = 0;
+            int cur = 0;
+            bool need_identify = true;
+
+            for (auto &ep : thread_entry_points[tid])
+            {
+                InsertIntoPool(local_pool.data(), local_size, L,
+                               SearchNeighbor(ep.second, ep.first, true));
+            }
+
+            while (cur < local_size)
+            {
+                if (best_thread_finish.load())
+                    break;
+                if (hop == election_hops)
+                {
+                    float distk = (local_size >= k) ? local_pool[k - 1].distance
+                                                    : std::numeric_limits<float>::max();
+                    if (distk < epsilon)
+                    {
+                        std::lock_guard<std::mutex> lock(elec_mutex);
+                        if (distk < epsilon)
+                        {
+                            epsilon = distk;
+                            best_thread_id = tid;
+                        }
+                    }
+                    decide_num.fetch_add(1);
+                }
+
+                if (need_identify && decide_num.load() == num_threads)
+                {
+                    need_identify = false;
+                    float best_dist = (local_size > 0) ? local_pool[0].distance
+                                                       : std::numeric_limits<float>::max();
+                    if (epsilon < best_dist)
+                    {
+                        good_thread[tid] = -1;
+                        break;
+                    }
+                    if (epsilon > best_dist)
+                        good_thread[tid] = 1;
+                }
+                bool was_expanded = local_pool[cur].expanded;
+                int next_cur = expand_level0_filtered(
+                    *this, cur, local_pool.data(), local_size, L, visited, filter_map,
+                    comp_dist, &ndis_local);
+                if (was_expanded)
+                    hop++;
+                if (next_cur <= cur)
+                    cur = next_cur;
+                else
+                    cur++;
+            }
+
+            if (best_thread_id == tid)
+                best_thread_finish.store(true);
+
+            thread_ndis[tid] = ndis_local;
+#pragma omp critical
+            for (int i = 0; i < local_size; i++)
+                InsertIntoPool(shared_pool.data(), shared_size, L,
+                               SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
+        }
         if ((int)g_thread_ndis_total.size() < num_threads)
             g_thread_ndis_total.resize(num_threads, 0);
         for (int t = 0; t < num_threads; t++)
@@ -1042,10 +981,8 @@ namespace acorn
             }
             std::sort(nl.begin(), nl.end());
 
-            if (level == 0 && (int)nl.size() > max_nb)
+            if (level == 0)
                 shrink_neighbor_list(acorn, nl, max_nb);
-            else if ((int)nl.size() > max_nb)
-                nl.resize(max_nb);
 
             size_t pos = b;
             for (auto &p : nl)
@@ -1054,50 +991,111 @@ namespace acorn
                 acorn.neighbors[pos++] = -1;
         }
 
-        // BFS at a single level to find candidate neighbors for a new point.
-        // Returns candidates in a sorted pool (ascending distance).
+        // BFS to find candidate neighbors for a new point, matching original ACORN.
+        // Uses two heaps: candidates (max-heap, farthest-first) and results (max-heap, top efConstruction).
         void search_neighbors_to_add(
-            const ACORN &acorn,
+            ACORN &acorn,
             const float *query, const float *xb, int d, int metric,
             int entry_point, float d_entry, int level,
             std::vector<bool> &visited,
-            std::vector<SearchNeighbor> &pool, int &pool_sz, int pool_cap)
+            std::vector<std::pair<float, int>> &results)
         {
-            visited[entry_point] = true;
-            InsertIntoPool(pool.data(), pool_sz, pool_cap,
-                           SearchNeighbor(entry_point, d_entry, true));
-
-            int cur = 0;
-            while (cur < pool_sz)
+            // results: max-heap (farthest at top), limited to efConstruction
+            std::vector<std::pair<float, int>> res_heap; // max-heap by distance
+            auto res_push = [&](float dist, int id)
             {
-                auto &cn = pool[cur];
-                if (cn.expanded)
+                res_heap.emplace_back(dist, id);
+                std::push_heap(res_heap.begin(), res_heap.end());
+            };
+            auto res_pop = [&]()
+            {
+                std::pop_heap(res_heap.begin(), res_heap.end());
+                res_heap.pop_back();
+            };
+            auto res_top = [&]() -> const std::pair<float, int> &
+            { return res_heap.front(); };
+
+            // candidates: max-heap (farthest at top) for BFS frontier
+            std::vector<std::pair<float, int>> cand_heap;
+            auto cand_push = [&](float dist, int id)
+            {
+                cand_heap.emplace_back(dist, id);
+                std::push_heap(cand_heap.begin(), cand_heap.end());
+            };
+            auto cand_top = [&]() -> const std::pair<float, int> &
+            { return cand_heap.front(); };
+            auto cand_pop = [&]()
+            {
+                std::pop_heap(cand_heap.begin(), cand_heap.end());
+                cand_heap.pop_back();
+            };
+
+            int efConstruction = acorn.efConstruction;
+            cand_push(d_entry, entry_point);
+            res_push(d_entry, entry_point);
+            visited[entry_point] = true;
+
+            // M target: 2*M*gamma at level 0, nb_neighbors(level) at higher levels
+            int M_target;
+            if (level == 0)
+                M_target = 2 * acorn.M * acorn.gamma;
+            else
+                M_target = acorn.nb_neighbors(level);
+
+            while (!cand_heap.empty())
+            {
+                const auto &currEv = cand_top();
+
+                // Greedy break
+                if ((currEv.first > res_top().first && acorn.gamma == 1) ||
+                    (int)res_heap.size() >= M_target)
+                    break;
+
+                int currNode = currEv.second;
+                cand_pop();
+
+                size_t b, e;
+                acorn.neighbor_range(currNode, level, &b, &e);
+                int numIters = 0;
+
+                for (size_t i = b; i < e; i++)
                 {
-                    cn.expanded = false;
-                    size_t b, e;
-                    acorn.neighbor_range(cn.id, level, &b, &e);
-                    int num_iters = 0;
-                    for (size_t j = b; j < e; j++)
+                    int nodeId = acorn.neighbors[i];
+                    if (nodeId < 0)
+                        break;
+                    if (visited[nodeId])
+                        continue;
+                    visited[nodeId] = true;
+
+                    numIters++;
+                    if (numIters > acorn.M)
+                        break;
+
+                    float dis = compute_dist(query, xb, d, metric, nodeId);
+
+                    if ((int)res_heap.size() < efConstruction || res_top().first > dis)
                     {
-                        int v = acorn.neighbors[j];
-                        if (v < 0)
-                            break;
-                        if (visited[v])
-                            continue;
-                        visited[v] = true;
-                        float dv = compute_dist(query, xb, d, metric, v);
-                        num_iters++;
-                        if (pool_sz == pool_cap && dv >= pool[pool_cap - 1].distance)
-                            continue;
-                        int r = InsertIntoPool(pool.data(), pool_sz, pool_cap,
-                                               SearchNeighbor(v, dv, true));
-                        (void)r;
-                        if (num_iters > acorn.M)
-                            break;
+                        res_push(dis, nodeId);
+                        cand_push(dis, nodeId);
+                        if ((int)res_heap.size() > efConstruction)
+                            res_pop();
                     }
+
+                    numIters++;
+                    if (numIters > acorn.M)
+                        break;
                 }
-                cur++;
             }
+
+            // Copy results to output (sorted ascending)
+            results.clear();
+            results.reserve(res_heap.size());
+            while (!res_heap.empty())
+            {
+                results.emplace_back(res_top());
+                res_pop();
+            }
+            std::reverse(results.begin(), results.end());
         }
 
         // Add bidirectional links for one point at one level.
@@ -1107,30 +1105,25 @@ namespace acorn
             int pt_id, int nearest, float d_nearest, int level, int ef,
             omp_lock_t *locks, std::vector<bool> &visited)
         {
-            int pool_cap = (level == 0) ? (2 * acorn.M * acorn.gamma) : ef;
-            std::vector<SearchNeighbor> pool(pool_cap + 1);
-            int pool_sz = 0;
+            std::vector<std::pair<float, int>> link_targets;
 
             search_neighbors_to_add(acorn, query, xb, d, metric,
                                     nearest, d_nearest, level, visited,
-                                    pool, pool_sz, pool_cap);
+                                    link_targets);
 
-            // Convert pool to sorted candidate list
-            std::vector<std::pair<float, int>> candidates;
-            for (int kk = 0; kk < pool_sz; kk++)
-                candidates.emplace_back(pool[kk].distance, pool[kk].id);
-            std::sort(candidates.begin(), candidates.end());
+            // Update nearest
+            if (!link_targets.empty())
+                nearest = link_targets[0].second;
 
-            // Prune at level 0
             int max_neighbors = acorn.nb_neighbors(level);
-            if (level == 0 && (int)candidates.size() > max_neighbors)
-                shrink_neighbor_list(acorn, candidates, max_neighbors);
-            else if ((int)candidates.size() > max_neighbors)
-                candidates.resize(max_neighbors);
 
-            // Add forward links (pt_id -> other)
+            // Shrink only at level 0
+            if (level == 0 && (int)link_targets.size() > max_neighbors)
+                shrink_neighbor_list(acorn, link_targets, max_neighbors);
+
+            // Add forward links
             std::vector<int> added;
-            for (auto &c : candidates)
+            for (auto &c : link_targets)
             {
                 add_link(acorn, xb, d, metric, pt_id, c.second, level);
                 added.push_back(c.second);
@@ -1247,7 +1240,7 @@ namespace acorn
         int metric = (metric_type == METRIC_INNER_PRODUCT) ? 0 : 1;
         const float *xb = get_xb();
 
-        prepare_level_tab(n, false);
+        max_level = prepare_level_tab(n, false);
         if (verbose)
             printf("  max_level = %d\n", max_level);
 
@@ -1362,6 +1355,91 @@ namespace acorn
         neighbors.resize(sz);
         checked_fread(neighbors.data(), sizeof(storage_idx_t), sz, fp);
         fclose(fp);
+    }
+
+    void ACORN::load_from_faiss(const char *filename, const std::vector<int> &labels)
+    {
+        FILE *fp = fopen(filename, "rb");
+        assert(fp);
+
+        // --- Outer IndexACORN ---
+        char fourcc[5] = {};
+        checked_fread(fourcc, 1, 4, fp);
+        assert(strncmp(fourcc, "IHNH", 4) == 0);
+
+        int64_t dummy;
+        uint8_t is_trained;
+        int mt;
+        checked_fread(&d, sizeof(int), 1, fp);
+        checked_fread(&ntotal, sizeof(int64_t), 1, fp);
+        checked_fread(&dummy, sizeof(int64_t), 1, fp);
+        checked_fread(&dummy, sizeof(int64_t), 1, fp);
+        checked_fread(&is_trained, 1, 1, fp);
+        checked_fread(&mt, sizeof(int), 1, fp);
+        metric_type = (mt == 0) ? METRIC_INNER_PRODUCT : METRIC_L2;
+        if (mt > 1)
+        {
+            float ma;
+            checked_fread(&ma, sizeof(float), 1, fp);
+        }
+
+        // --- ACORN graph ---
+        auto read_vec = [&](auto &v)
+        {
+            size_t sz;
+            checked_fread(&sz, sizeof(size_t), 1, fp);
+            v.resize(sz);
+            if (sz > 0)
+                checked_fread(v.data(), sizeof(v[0]), sz, fp);
+        };
+        read_vec(assign_probas);
+        read_vec(cum_nneighbor_per_level);
+        read_vec(levels);
+        read_vec(offsets);
+        read_vec(neighbors);
+        read_vec(nb_per_level);
+
+        checked_fread(&entry_point, sizeof(storage_idx_t), 1, fp);
+        checked_fread(&max_level, sizeof(int), 1, fp);
+        checked_fread(&efConstruction, sizeof(int), 1, fp);
+        checked_fread(&efSearch, sizeof(int), 1, fp);
+        checked_fread(&dummy, sizeof(int), 1, fp); // upper_beam (unused)
+        checked_fread(&gamma, sizeof(int), 1, fp);
+        checked_fread(&M, sizeof(int), 1, fp);
+        checked_fread(&M_beta, sizeof(int), 1, fp);
+
+        // --- Inner IndexFlat storage ---
+        char inner_fourcc[5] = {};
+        checked_fread(inner_fourcc, 1, 4, fp);
+
+        // write_index_header for inner IndexFlat
+        int inner_d;
+        int64_t inner_ntotal;
+        uint8_t inner_trained;
+        int inner_metric;
+        checked_fread(&inner_d, sizeof(int), 1, fp);
+        checked_fread(&inner_ntotal, sizeof(int64_t), 1, fp);
+        checked_fread(&dummy, sizeof(int64_t), 1, fp);
+        checked_fread(&dummy, sizeof(int64_t), 1, fp);
+        checked_fread(&inner_trained, 1, 1, fp);
+        checked_fread(&inner_metric, sizeof(int), 1, fp);
+        if (inner_metric > 1)
+        {
+            float ma;
+            checked_fread(&ma, sizeof(float), 1, fp);
+        }
+
+        // codes: WRITEXBVECTOR — size_t num_floats (= ntotal * d), then data
+        size_t num_floats;
+        checked_fread(&num_floats, sizeof(size_t), 1, fp);
+        code_size = (size_t)d * sizeof(float);
+        codes.resize(ntotal * code_size);
+        checked_fread(codes.data(), 1, codes.size(), fp);
+        fclose(fp);
+
+        // Store metadata
+        metadata_storage.assign(labels.begin(), labels.end());
+        metadata = metadata_storage.data();
     }
 
 } // namespace acorn

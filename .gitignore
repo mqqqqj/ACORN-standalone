@@ -12,6 +12,9 @@ cmake-build-*/
 # IDE
 .idea/
 .vscode/
+.claude/
+.codex/
+.agents/
 *.swp
 *.swo
 *~

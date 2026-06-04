@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(ACORN VERSION 1.0.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-unused-variable -Wno-sign-compare -O3 -mavx2 -mfma")
 
@@ -38,11 +38,9 @@ target_link_libraries(acorn PUBLIC OpenMP::OpenMP_CXX)
 add_executable(gen_labels examples/gen_labels.cpp)
 target_link_libraries(gen_labels acorn)
 
-add_executable(compute_groundtruth examples/compute_groundtruth.cpp)
-target_link_libraries(compute_groundtruth acorn)
-
 add_executable(compute_filtered_gt examples/compute_filtered_gt.cpp)
 target_link_libraries(compute_filtered_gt acorn)
+
 add_executable(debug_search examples/debug_search.cpp)
 target_link_libraries(debug_search acorn)
 

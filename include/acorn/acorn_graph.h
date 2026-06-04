@@ -10,91 +10,100 @@
 #include "random.h"
 #include "distance.h"
 
-namespace acorn {
+namespace acorn
+{
 
-struct ACORN {
-    using storage_idx_t = int32_t;
+    struct ACORN
+    {
+        using storage_idx_t = int32_t;
 
-    // --- Graph data ---
-    std::vector<double> assign_probas;
-    std::vector<int> cum_nneighbor_per_level;
-    std::vector<int> levels;
-    std::vector<storage_idx_t> nb_per_level;
-    std::vector<size_t> offsets;
-    std::vector<storage_idx_t> neighbors;
-    storage_idx_t entry_point;
-    RandomGenerator rng;
+        // --- Graph data ---
+        std::vector<double> assign_probas;
+        std::vector<int> cum_nneighbor_per_level;
+        std::vector<int> levels;
+        std::vector<storage_idx_t> nb_per_level;
+        std::vector<size_t> offsets;
+        std::vector<storage_idx_t> neighbors;
+        storage_idx_t entry_point;
+        RandomGenerator rng;
 
-    int gamma, M, M_beta, max_level;
-    int efConstruction, efSearch;
+        int gamma, M, M_beta, max_level;
+        int efConstruction, efSearch;
 
-    // Metadata for hybrid search (points to metadata_storage.data())
-    const int* metadata;
+        // Metadata for hybrid search (points to metadata_storage.data())
+        const int *metadata;
 
-    // --- Index data (from old IndexACORN) ---
-    int d = 0;
-    idx_t ntotal = 0;
-    MetricType metric_type = METRIC_L2;
-    bool verbose = false;
-    size_t code_size = 0;
-    std::vector<uint8_t> codes;
-    std::vector<int> metadata_storage;
+        // --- Index data (from old IndexACORN) ---
+        int d = 0;
+        idx_t ntotal = 0;
+        MetricType metric_type = METRIC_L2;
+        bool verbose = false;
+        size_t code_size = 0;
+        std::vector<uint8_t> codes;
+        std::vector<int> metadata_storage;
 
-    // --- Constructors ---
-    ACORN() : entry_point(-1), rng(12345),
-              gamma(0), M(0), M_beta(0), max_level(-1),
-              efConstruction(0), efSearch(16),
-              metadata(nullptr) { offsets.push_back(0); }
+        // --- Constructors ---
+        ACORN() : entry_point(-1), rng(12345),
+                  gamma(0), M(0), M_beta(0), max_level(-1),
+                  efConstruction(0), efSearch(16),
+                  metadata(nullptr) { offsets.push_back(0); }
 
-    explicit ACORN(int M, int gamma, std::vector<int>& metadata, int M_beta);
+        explicit ACORN(int M, int gamma, std::vector<int> &metadata, int M_beta);
 
-    ACORN(int d, int M, int gamma, std::vector<int>& metadata,
-          int M_beta, MetricType metric = METRIC_L2);
+        ACORN(int d, int M, int gamma, std::vector<int> &metadata,
+              int M_beta, MetricType metric = METRIC_L2);
 
-    // --- Graph-level methods ---
-    void set_default_probas(int M, float levelMult, int M_beta, int gamma = 1);
-    int random_level();
-    int nb_neighbors(int layer_no) const;
-    int cum_nb_neighbors(int layer_no) const;
-    void neighbor_range(idx_t no, int layer_no, size_t* begin, size_t* end) const;
-    int prepare_level_tab(size_t n, bool preset_levels = false);
-    void reset();
+        // --- Graph-level methods ---
+        void set_default_probas(int M, float levelMult, int M_beta, int gamma = 1);
+        int random_level();
+        int nb_neighbors(int layer_no) const;
+        int cum_nb_neighbors(int layer_no) const;
+        void neighbor_range(idx_t no, int layer_no, size_t *begin, size_t *end) const;
+        int prepare_level_tab(size_t n, bool preset_levels = false);
+        void reset();
 
-    // --- Raw graph search (NSG-style sorted pool) ---
-    // xb = base vectors, d = dimension, metric: 0=IP, 1=L2
-    int search(const float* query, const float* xb, int d, int metric,
-               int k, int efSearch_val,
-               int* indices, float* distances,
-               const char* filter_map = nullptr) const;
+        // --- Raw graph search (NSG-style sorted pool) ---
+        // xb = base vectors, d = dimension, metric: 0=IP, 1=L2
+        int search(const float *query, const float *xb, int d, int metric,
+                   int k, int efSearch_val,
+                   int *indices, float *distances,
+                   const char *filter_map) const;
 
-    // --- iQAN search (sync-and-redistribute) ---
-    int iqan_search(const float* query, const float* xb, int d, int metric,
-                    int k, int efSearch_val,
-                    int* indices, float* distances,
-                    int num_threads, int efs,
-                    const char* filter_map = nullptr) const;
+        // --- iQAN search (sync-and-redistribute) ---
+        int iqan_search(const float *query, const float *xb, int d, int metric,
+                        int k, int efSearch_val,
+                        int *indices, float *distances,
+                        int num_threads, const char *filter_map) const;
 
-    // --- No-sync parallel search ---
-    int no_sync_search(const float* query, const float* xb, int d, int metric,
+        // --- No-sync parallel search ---
+        int no_sync_search(const float *query, const float *xb, int d, int metric,
+                           int k, int efSearch_val,
+                           int *indices, float *distances,
+                           int num_threads,
+                           const char *filter_map) const;
+
+    // --- ScatterSearch (ICDE 2026) ---
+    int scatter_search(const float* query, const float* xb, int d, int metric,
                        int k, int efSearch_val,
                        int* indices, float* distances,
-                       int num_threads,
-                       const char* filter_map = nullptr) const;
+                       int num_threads, int Helec,
+                       const char* filter_map) const;
 
-    // --- Build / persistence ---
-    void add(idx_t n, const float* x);
-    void save(const char* filename) const;
-    void load(const char* filename);
+        // --- Build / persistence ---
+        void add(idx_t n, const float *x);
+        void save(const char *filename) const;
+        void load(const char *filename);
+        void load_from_faiss(const char *filename, const std::vector<int> &labels);
 
-    // --- Access ---
-    float* get_xb() { return (float*)codes.data(); }
-    const float* get_xb() const { return (const float*)codes.data(); }
-};
+        // --- Access ---
+        float *get_xb() { return (float *)codes.data(); }
+        const float *get_xb() const { return (const float *)codes.data(); }
+    };
 
-// Per-thread NDC profiling
-void reset_thread_ndis(int num_threads);
-void reset_ser_ndis();
-const std::vector<size_t>& get_thread_ndis();
-size_t get_ser_ndis();
+    // Per-thread NDC profiling
+    void reset_thread_ndis(int num_threads);
+    void reset_ser_ndis();
+    const std::vector<size_t> &get_thread_ndis();
+    size_t get_ser_ndis();
 
 } // namespace acorn

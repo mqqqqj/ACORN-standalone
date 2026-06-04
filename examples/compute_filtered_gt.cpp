@@ -18,24 +18,24 @@ static double get_ms()
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "Usage: %s --base <base.fbin> --query <query.fbin> \\\n"
-        "       --base-labels <labels.ibin> --query-labels <qlabels.ibin> \\\n"
-        "       --output <gt.ibin>\n"
-        "\n"
-        "Compute L2 ground truth with label filter.\n"
-        "For each query, only considers base vectors with the same label.\n"
-        "\n"
-        "Required:\n"
-        "  --base <path>         Base vectors in fbin format\n"
-        "  --query <path>        Query vectors in fbin format\n"
-        "  --base-labels <path>  Base label file in ibin format\n"
-        "  --query-labels <path> Query label file in ibin format\n"
-        "  --output <path>       Output filtered GT file (ibin: nq, k, nq*k ids)\n"
-        "\n"
-        "Options:\n"
-        "  --k <int>             Number of nearest neighbors (default: 100)\n"
-        "  --nq <int>            Max queries to compute (default: all)\n",
-        prog);
+            "Usage: %s --base <base.fbin> --query <query.fbin> \\\n"
+            "       --base-labels <labels.ibin> --query-labels <qlabels.ibin> \\\n"
+            "       --output <gt.ibin>\n"
+            "\n"
+            "Compute brute-force ground truth with label filter.\n"
+            "For each query, only considers base vectors with the same label.\n"
+            "\n"
+            "Required:\n"
+            "  --base <path>         Base vectors in fbin format\n"
+            "  --query <path>        Query vectors in fbin format\n"
+            "  --base-labels <path>  Base label file in ibin format\n"
+            "  --query-labels <path> Query label file in ibin format\n"
+            "  --output <path>       Output filtered GT file (ibin: nq, k, nq*k ids)\n"
+            "\n"
+            "Options:\n"
+            "  --k <int>             Number of nearest neighbors (default: 100)\n"
+            "  --metric <l2|ip>      Distance metric (default: l2)\n",
+            prog);
     exit(1);
 }
 
@@ -48,6 +48,7 @@ int main(int argc, char *argv[])
     const char *output_file = NULL;
     int k = 100;
     int num_queries = -1;
+    bool use_ip = false;
 
     for (int i = 1; i < argc; i++)
     {
@@ -63,18 +64,33 @@ int main(int argc, char *argv[])
             output_file = argv[++i];
         else if (strcmp(argv[i], "--k") == 0 && i + 1 < argc)
             k = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--nq") == 0 && i + 1 < argc)
-            num_queries = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc)
+        {
+            const char *m = argv[++i];
+            if (strcmp(m, "ip") == 0)
+                use_ip = true;
+            else if (strcmp(m, "l2") == 0)
+                use_ip = false;
+            else
+            {
+                fprintf(stderr, "Unknown metric: %s\n", m);
+                return 1;
+            }
+        }
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
             usage(argv[0]);
         else
-            { fprintf(stderr, "Unknown option: %s\n", argv[i]); usage(argv[0]); }
+        {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            usage(argv[0]);
+        }
     }
 
     if (!base_file || !query_file || !base_labels || !query_labels || !output_file)
         usage(argv[0]);
 
-    printf("=== Filtered Ground Truth Computation ===\n\n");
+    printf("=== Filtered Ground Truth Computation ===\n");
+    printf("Metric: %s\n\n", use_ip ? "IP" : "L2");
 
     printf("Loading base: %s\n", base_file);
     double t0 = get_ms();
@@ -89,7 +105,11 @@ int main(int argc, char *argv[])
     std::vector<float> queries = std::move(qr.first);
     int nq_all = qr.second.first, qd = qr.second.second;
     printf("  nq=%d, d=%d (%.0f ms)\n", nq_all, qd, get_ms() - t0);
-    if (qd != d) { fprintf(stderr, "Error: dim mismatch\n"); return 1; }
+    if (qd != d)
+    {
+        fprintf(stderr, "Error: dim mismatch\n");
+        return 1;
+    }
     if (num_queries > 0 && num_queries < nq_all)
     {
         nq_all = num_queries;
@@ -106,7 +126,9 @@ int main(int argc, char *argv[])
 
     // Pre-index by label
     int max_label = 0;
-    for (int lbl : bl) if (lbl > max_label) max_label = lbl;
+    for (int lbl : bl)
+        if (lbl > max_label)
+            max_label = lbl;
     std::vector<std::vector<int>> label_to_ids(max_label + 1);
     for (int i = 0; i < n; i++)
         label_to_ids[bl[i]].push_back(i);
@@ -123,24 +145,38 @@ int main(int argc, char *argv[])
     {
         int q_label = ql[q];
         const std::vector<int> &candidates = label_to_ids[q_label];
-        const float *qvec = queries.data() + q * d;
-        if (candidates.empty()) continue;
+        const float *qvec = queries.data() + (size_t)q * d;
+        if (candidates.empty())
+            continue;
         std::vector<std::pair<float, int>> dists;
         dists.reserve(candidates.size());
         for (int id : candidates)
-            dists.emplace_back(acorn::fvec_L2sqr(qvec, xb.data() + id * d, d), id);
+        {
+            const float *base_vec = xb.data() + (size_t)id * d;
+            float dist = use_ip ? -acorn::fvec_inner_product(qvec, base_vec, d)
+                                : acorn::fvec_L2sqr(qvec, base_vec, d);
+            dists.emplace_back(dist, id);
+        }
         int take = std::min(k, (int)dists.size());
         std::partial_sort(dists.begin(), dists.begin() + take, dists.end());
         for (int j = 0; j < take; j++)
             gt_ids[q * k + j] = dists[j].second;
-        if (q % 500 == 0) { printf("\r  %d / %d queries done", q, nq_all); fflush(stdout); }
+        if (q % 500 == 0)
+        {
+            printf("\r  %d / %d queries done", q, nq_all);
+            fflush(stdout);
+        }
     }
     printf("\r  %d / %d queries done\n", nq_all, nq_all);
     t_gt += get_ms();
     printf("  Time: %.1f ms (%.2f sec)\n", t_gt, t_gt / 1000.0);
 
     FILE *fp = fopen(output_file, "wb");
-    if (!fp) { fprintf(stderr, "Error: cannot open %s\n", output_file); return 1; }
+    if (!fp)
+    {
+        fprintf(stderr, "Error: cannot open %s\n", output_file);
+        return 1;
+    }
     fwrite(&nq_all, sizeof(int), 1, fp);
     fwrite(&k, sizeof(int), 1, fp);
     fwrite(gt_ids.data(), sizeof(int), gt_ids.size(), fp);

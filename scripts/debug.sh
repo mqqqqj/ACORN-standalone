@@ -18,13 +18,14 @@ M="${M:-16}"
 GAMMA="${GAMMA:-8}"
 EFC="${EFC:-64}"
 EF="${EF:-64}"
+METRIC="${METRIC:-l2}"
 
-echo "=== ACORN Debug Search (SIFT1M) ==="
+echo "=== ACORN Debug Search ==="
 echo "Base:   $BASE"
 echo "Labels: $LABELS"
 echo "Query:  $QUERY"
 echo "GT:     $GT"
-echo "Params: n=$N, nq=$NQ, k=$K, M=$M, gamma=$GAMMA, efc=$EFC, ef=$EF"
+echo "Params: n=$N, nq=$NQ, k=$K, M=$M, gamma=$GAMMA, efc=$EFC, ef=$EF, metric=$METRIC"
 echo
 
 ARGS=(
@@ -33,7 +34,7 @@ ARGS=(
     --query "$QUERY"
     --gt "$GT"
     --n "$N" --nq "$NQ" --k "$K"
-    --M "$M" --gamma "$GAMMA" --efc "$EFC" --ef "$EF"
+    --M "$M" --gamma "$GAMMA" --efc "$EFC" --ef "$EF" --metric "$METRIC"
 )
 if [ -n "$OUTPUT" ]; then
     ARGS+=(--output "$OUTPUT")
