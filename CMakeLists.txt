@@ -11,7 +11,6 @@ find_package(OpenMP REQUIRED)
 # ACORN library
 set(ACORN_SOURCES
     src/acorn_graph.cpp
-    src/random.cpp
     src/distances.cpp
     src/file_io.cpp
 )
@@ -19,7 +18,6 @@ set(ACORN_SOURCES
 set(ACORN_HEADERS
     include/acorn/types.h
     include/acorn/distance.h
-    include/acorn/random.h
     include/acorn/acorn_graph.h
     include/acorn/file_io.h
 )
@@ -40,12 +38,6 @@ target_link_libraries(gen_labels acorn)
 
 add_executable(compute_filtered_gt examples/compute_filtered_gt.cpp)
 target_link_libraries(compute_filtered_gt acorn)
-
-add_executable(analyze_filter_radius examples/analyze_filter_radius.cpp)
-target_link_libraries(analyze_filter_radius acorn)
-
-add_executable(build_index examples/build.cpp)
-target_link_libraries(build_index acorn)
 
 add_executable(search examples/search.cpp)
 target_link_libraries(search acorn)

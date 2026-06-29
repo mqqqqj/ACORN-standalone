@@ -1,196 +1,155 @@
-# ACORN: Approximate Nearest Neighbor Search with Attribute Filters
+# ACORN Standalone Search
 
-ACORN is a graph-based approximate nearest neighbor (ANN) search library supporting
-**predicate-filtered hybrid search** — filtering by discrete attribute during the
-graph traversal itself, not as a post-processing step.
+This repository contains the standalone search/evaluation path for ACORN graphs
+exported from FAISS. It intentionally does not build ACORN graphs locally: the
+supported workflow is to load a FAISS-built `IndexACORN` file, attach label
+metadata, and run filtered graph search.
 
-Originally part of [FAISS](https://github.com/facebookresearch/faiss), this is a
-**standalone** extraction with zero external dependencies beyond the C++ standard
-library and OpenMP.
+## What Is Included
 
-## How It Works
-
-ACORN builds a layered navigable graph and applies a **predicate-guided pruning
-strategy** during both construction and search. Each vector has an integer label.
-The algorithm:
-
-- Prioritizes edges to nodes with the same label, keeping the filtered subgraph connected.
-- Expands to neighbors-of-neighbors when immediate neighbors have insufficient label matches.
-- Uses a `gamma` parameter to trade off index size vs. filtered recall.
-
-Three search modes are provided:
-
-| Mode | Description |
-|------|-------------|
-| Serial | Single-threaded NSG-style backtracking with 2-hop expansion |
-| iQAN | Intra-query parallel: sync-and-redistribute, per-thread pool of `efs` candidates |
-| No-Sync | Intra-query parallel: threads search independently, merge at the end |
+- FAISS ACORN graph loader: `ACORN::load_from_faiss(...)`
+- Serial filtered graph search
+- Intra-query parallel search modes: `iqan`, `nosync`, and `scatter`
+- Label generation and brute-force filtered ground-truth utilities
+- Filter-radius analysis utility
 
 ## Requirements
 
-- C++11 or later
-- CMake ≥ 3.10
+- CMake >= 3.10
+- C++14 compiler
 - OpenMP
 - x86-64 with AVX2 + FMA
 
 ## Project Structure
 
-```
-├── include/acorn/       # Public headers
-│   ├── acorn_graph.h    # ACORN index struct + all search methods
-│   ├── types.h          # MetricType, SearchNeighbor, InsertIntoPool
-│   ├── distance.h       # L2 / inner product with SIMD
-│   ├── file_io.h        # fbin / ibin / groundtruth I/O
-│   └── random.h         # RandomGenerator (used during construction)
-├── src/                 # Library sources → libacorn.a
-│   ├── acorn_graph.cpp  # Build, search (serial / iQAN / no-sync), persistence
-│   ├── distances.cpp    # SIMD distance kernels
-│   ├── file_io.cpp      # Binary format I/O
-│   └── random.cpp       # Mersenne Twister wrapper
-├── examples/            # Standalone tools (all CLI-driven, no hardcoded paths)
-│   ├── build.cpp        # Build an index from base vectors + labels
-│   ├── search.cpp       # Serial + iQAN + No-Sync search with recall evaluation
-│   ├── gen_labels.cpp   # Generate random labels for a dataset
-│   ├── compute_groundtruth.cpp      # Brute-force L2 ground truth
-│   ├── compute_filtered_gt.cpp      # Brute-force filtered L2 ground truth
-│   └── debug_search.cpp # Quick small-scale build + search for debugging
-├── scripts/             # Convenience shell scripts (defaults target SIFT1M)
-│   ├── build.sh         # Build index
-│   ├── search.sh        # Search evaluation
-│   ├── gen_labels.sh    # Generate labels
-│   ├── compute_gt.sh    # Compute ground truth
-│   ├── compute_filtered_gt.sh  # Compute filtered ground truth
-│   ├── debug.sh         # Quick debug run
-│   └── run_all.sh       # End-to-end pipeline
-└── data/                # Pre-built SIFT1M index, labels, and ground truth
+```text
+include/acorn/
+  acorn_graph.h     ACORN graph data, FAISS loader, search APIs
+  distance.h        L2 / inner-product kernels
+  file_io.h         fbin / ibin / ground-truth I/O
+  types.h           shared types and search-pool helpers
+
+src/
+  acorn_graph.cpp   FAISS graph loading and search implementations
+  distances.cpp     SIMD distance kernels
+  file_io.cpp       binary file readers/writers
+
+examples/
+  search.cpp                  search and recall evaluation
+  gen_labels.cpp              generate label files
+  compute_filtered_gt.cpp     brute-force filtered ground truth
+  analyze_filter_radius.cpp   filtered/unfiltered radius analysis
+
+scripts/
+  search.sh
+  gen_labels.sh
+  compute_filtered_gt.sh
 ```
 
 ## Build
 
 ```bash
-mkdir build && cd build
+mkdir -p build
+cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
 
-Binaries are placed in `build/`:
-`build_index`, `search`, `gen_labels`, `compute_groundtruth`,
-`compute_filtered_gt`, `debug_search`.
+Generated binaries:
 
-## Quick Start
+- `search`
+- `gen_labels`
+- `compute_filtered_gt`
+- `analyze_filter_radius`
+
+There is no `build_index` target in this repository.
+
+## Search
+
+```bash
+./build/search \
+  --index acorn.faiss_index \
+  --query queries.fbin \
+  --labels base_labels.ibin \
+  --qlabels query_labels.ibin \
+  --gt gt_filtered.ibin \
+  --k 100 \
+  --ef 400 \
+  --threads 8 \
+  --efs 200 \
+  --mode serial
+```
+
+Search modes:
+
+| Mode | Description |
+|------|-------------|
+| `serial` | Single-threaded filtered search |
+| `iqan` | Sync-and-redistribute intra-query parallel search |
+| `nosync` | Independent per-thread search with final merge |
+| `scatter` | Leader-guided parallel search |
+| `all` | Run all modes and print a summary |
+
+The `scripts/search.sh` wrapper provides dataset-oriented defaults that can be
+overridden with environment variables:
+
+```bash
+INDEX=/path/to/acorn.faiss_index \
+QUERY=/path/to/query.fbin \
+LABELS=/path/to/base_labels.ibin \
+QLABELS=/path/to/query_labels.ibin \
+GT=/path/to/gt_filtered.ibin \
+MODE=serial \
+./scripts/search.sh
+```
+
+## C++ Usage
 
 ```cpp
 #include "acorn/acorn_graph.h"
 #include "acorn/file_io.h"
 
-int main()
-{
-    int n = 10000, d = 64;
+std::vector<int> base_labels = acorn::read_ibin("base_labels.ibin");
 
-    // Generate random labels
-    std::vector<int> labels(n);
-    for (int i = 0; i < n; i++) labels[i] = i % 10;
+acorn::ACORN index;
+index.load_from_faiss("acorn.faiss_index", base_labels);
 
-    // Build index
-    acorn::ACORN index(d, /*M=*/32, /*gamma=*/12, labels, /*M_beta=*/32, acorn::METRIC_L2);
-    index.efConstruction = 200;
-    // ... fill float vectors into base[n*d] ...
-    index.add(n, base);
-
-    // Save
-    index.save("acorn.index");
-
-    // Load
-    acorn::ACORN idx2;
-    idx2.load("acorn.index");
-
-    // Serial search: 1 query, top-10
-    std::vector<int> labs(10);
-    std::vector<float> dists(10);
-    int metric = 1;  // L2
-    idx2.search(query, idx2.get_xb(), idx2.d, metric, 10, 64,
-                labs.data(), dists.data());
-
-    // Filtered search (only label == 3)
-    std::vector<char> filter(n, 0);
-    for (int i = 0; i < n; i++)
-        if (labels[i] == 3) filter[i] = 1;
-    idx2.search(query, idx2.get_xb(), idx2.d, metric, 10, 64,
-                labs.data(), dists.data(), filter.data());
-
-    // iQAN parallel search (4 threads, efs=100)
-    idx2.iqan_search(query, idx2.get_xb(), idx2.d, metric, 10, 100,
-                     labs.data(), dists.data(), 4, 100, filter.data());
-
-    // No-sync parallel search (4 threads)
-    idx2.no_sync_search(query, idx2.get_xb(), idx2.d, metric, 10, 100,
-                        labs.data(), dists.data(), 4, filter.data());
+std::vector<char> filter(index.ntotal, 0);
+for (int i = 0; i < index.ntotal; i++) {
+    if (base_labels[i] == query_label) {
+        filter[i] = 1;
+    }
 }
+
+std::vector<int> ids(k);
+std::vector<float> distances(k);
+int metric = (index.metric_type == acorn::METRIC_INNER_PRODUCT) ? 0 : 1;
+
+int found = index.search(
+    query,
+    index.get_xb(),
+    index.d,
+    metric,
+    k,
+    ef,
+    ids.data(),
+    distances.data(),
+    filter.data());
 ```
-
-## CLI Tools
-
-All tools accept `--help` for usage. No file paths are hardcoded.
-
-### Build Index
-
-```bash
-./build_index --base sift_base.fbin --labels labels.ibin --output acorn.index \
-              --M 32 --gamma 12 --efc 200 --metric l2
-```
-
-### Search & Evaluate
-
-```bash
-# Unfiltered, no ground truth
-./search --index acorn.index --query queries.fbin --k 100 --ef 200 --nq 1000
-
-# Filtered with recall evaluation
-./search --index acorn.index --query queries.fbin \
-         --labels labels.ibin --qlabels query_labels.ibin \
-         --gt gt_filtered.ibin --k 100 --ef 400 --threads 4 --efs 100 --nq 1000
-```
-
-### SIFT1M Pipeline
-
-```bash
-# One-shot (skips GT if already computed, skips build if index exists)
-SKIP_GT=1 SKIP_BUILD=1 ./scripts/run_all.sh
-
-# Or step by step
-./scripts/gen_labels.sh
-./scripts/compute_gt.sh
-./scripts/compute_filtered_gt.sh
-./scripts/build.sh
-./scripts/search.sh
-```
-
-Default paths target the SIFT1M dataset in `/dataset/SIFT1M/`. Override with
-environment variables:
-
-```bash
-BASE=/data/my_base.fbin QUERY=/data/my_query.fbin OUTPUT=./my.index ./scripts/build.sh
-```
-
-## Key Parameters
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `M` | Base graph degree | 32 |
-| `gamma` | Pruning multiplier — higher improves filtered recall | 12 |
-| `M_beta` | Same-label edges to prioritize before 2-hop expansion | M |
-| `efConstruction` | Search depth during construction | M × gamma |
-| `ef` | Search depth for serial query | 200 |
-| `efs` | Pool size per thread in parallel search | 100 |
-| `threads` | Number of parallel search threads | 4 |
 
 ## File Formats
 
-- **fbin**: 4-byte `int32_t(n)` + 4-byte `int32_t(d)` + `n×d` × `float32` (row-major, LE)
-- **ibin**: 4-byte `int32_t(count)` + `count` × `int32_t` (LE)
-- **Ground truth** (ibin variant): 4-byte `int32_t(nq)` + 4-byte `int32_t(k)` + `nq×k` × `int32_t` (LE)
-- **ACORN index**: custom binary with magic `ACRN` followed by header, vectors, labels, and graph data
+- `fbin`: `int32_t n`, `int32_t d`, then `n * d` float32 values in row-major order
+- `ibin`: `int32_t count`, then `count` int32 values
+- filtered ground truth: `int32_t nq`, `int32_t k`, then `nq * k` int32 ids
+- index: FAISS `IndexACORN` binary layout loaded by `ACORN::load_from_faiss`
+
+## Notes
+
+The loader expects the ACORN graph and its flat vector storage to be present in
+the FAISS index file. Base labels are stored separately in this repo's workflow
+and passed to `load_from_faiss`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

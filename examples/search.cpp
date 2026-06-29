@@ -172,7 +172,6 @@ int main(int argc, char *argv[])
     printf("Loading index ...\n");
     double t0 = get_ms();
     acorn::ACORN index;
-    // index.load(index_file);
     index.load_from_faiss(index_file, base_labels);
     printf("  ntotal=%ld, d=%d, M=%d (%.0f ms)\n",
            index.ntotal, index.d, index.M, get_ms() - t0);

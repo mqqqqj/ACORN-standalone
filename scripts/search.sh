@@ -10,7 +10,7 @@ PROJ_DIR="$(dirname "$SCRIPT_DIR")"
 BIN="$PROJ_DIR/build/search"
 
 K="${K:-100}"
-EF="${EF:-400}"
+EF="${EF:-200}"
 THREADS="${THREADS:-8}"
 EFS="${EFS:-200}"
 NQ="${NQ:-1000}"
@@ -31,7 +31,7 @@ HELEC="${HELEC:-50}"
 # GT="${GT:-$PROJ_DIR/data/laion10m/laion10m_gt_filtered_uniform_n10.ibin}"
 
 # DEEP10M
-INDEX="${INDEX:-$PROJ_DIR/data/deep10m/acorn_deep10m_efc500.index}"
+INDEX="${INDEX:-$PROJ_DIR/data/deep10m/acorn_deep10m_efc500.faiss_index}"
 QUERY="${QUERY:-/dataset/DEEP10M/query.fbin}"
 LABELS="${LABELS:-$PROJ_DIR/data/deep10m/base_labels_uniform_n10.ibin}"
 QLABELS="${QLABELS:-$PROJ_DIR/data/deep10m/query_labels_uniform_n10.ibin}"

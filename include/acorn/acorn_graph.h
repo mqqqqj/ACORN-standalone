@@ -7,7 +7,6 @@
 #include <omp.h>
 
 #include "types.h"
-#include "random.h"
 #include "distance.h"
 
 namespace acorn
@@ -25,7 +24,6 @@ namespace acorn
         std::vector<size_t> offsets;
         std::vector<storage_idx_t> neighbors;
         storage_idx_t entry_point;
-        RandomGenerator rng;
 
         int gamma, M, M_beta, max_level;
         int efConstruction, efSearch;
@@ -43,24 +41,15 @@ namespace acorn
         std::vector<int> metadata_storage;
 
         // --- Constructors ---
-        ACORN() : entry_point(-1), rng(12345),
+        ACORN() : entry_point(-1),
                   gamma(0), M(0), M_beta(0), max_level(-1),
                   efConstruction(0), efSearch(16),
                   metadata(nullptr) { offsets.push_back(0); }
 
-        explicit ACORN(int M, int gamma, std::vector<int> &metadata, int M_beta);
-
-        ACORN(int d, int M, int gamma, std::vector<int> &metadata,
-              int M_beta, MetricType metric = METRIC_L2);
-
         // --- Graph-level methods ---
-        void set_default_probas(int M, float levelMult, int M_beta, int gamma = 1);
-        int random_level();
         int nb_neighbors(int layer_no) const;
         int cum_nb_neighbors(int layer_no) const;
         void neighbor_range(idx_t no, int layer_no, size_t *begin, size_t *end) const;
-        int prepare_level_tab(size_t n, bool preset_levels = false);
-        void reset();
 
         // --- Raw graph search (NSG-style sorted pool) ---
         // xb = base vectors, d = dimension, metric: 0=IP, 1=L2
@@ -83,16 +72,13 @@ namespace acorn
                            const char *filter_map) const;
 
     // --- ScatterSearch (ICDE 2026) ---
-    int scatter_search(const float* query, const float* xb, int d, int metric,
-                       int k, int efSearch_val,
-                       int* indices, float* distances,
-                       int num_threads, int Helec,
-                       const char* filter_map) const;
+        int scatter_search(const float* query, const float* xb, int d, int metric,
+                           int k, int efSearch_val,
+                           int* indices, float* distances,
+                           int num_threads, int Helec,
+                           const char* filter_map) const;
 
-        // --- Build / persistence ---
-        void add(idx_t n, const float *x);
-        void save(const char *filename) const;
-        void load(const char *filename);
+        // --- FAISS index loading ---
         void load_from_faiss(const char *filename, const std::vector<int> &labels);
 
         // --- Access ---
