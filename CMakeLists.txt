@@ -41,8 +41,8 @@ target_link_libraries(gen_labels acorn)
 add_executable(compute_filtered_gt examples/compute_filtered_gt.cpp)
 target_link_libraries(compute_filtered_gt acorn)
 
-add_executable(debug_search examples/debug_search.cpp)
-target_link_libraries(debug_search acorn)
+add_executable(analyze_filter_radius examples/analyze_filter_radius.cpp)
+target_link_libraries(analyze_filter_radius acorn)
 
 add_executable(build_index examples/build.cpp)
 target_link_libraries(build_index acorn)

@@ -158,19 +158,30 @@ namespace acorn
     void reset_ser_ndis() { g_ser_ndis = 0; }
     size_t get_ser_ndis() { return g_ser_ndis; }
 
+    // Per-function phase timing (ms, accumulated across queries)
+    static PhaseTiming g_nosync_timing, g_scatter_timing;
+    void reset_phase_timing()
+    {
+        g_nosync_timing = PhaseTiming();
+        g_scatter_timing = PhaseTiming();
+    }
+    const PhaseTiming &get_nosync_timing() { return g_nosync_timing; }
+    const PhaseTiming &get_scatter_timing() { return g_scatter_timing; }
+
     static inline float compute_dist(const float *query, const float *xb, int d,
                                      int metric, int v)
     {
-        g_ser_ndis++;
         if (metric == 0) // inner product: negate
             return -fvec_inner_product(query, xb + (size_t)v * d, d);
         else
             return fvec_L2sqr(query, xb + (size_t)v * d, d);
     }
 
+    template <typename DistFn>
     static inline void greedy_update(
-        const ACORN &hnsw, const float *query, const float *xb, int d, int metric,
-        const char *filter_map, int level, int &nearest, float &d_nearest)
+        const ACORN &hnsw,
+        const char *filter_map, int level, int &nearest, float &d_nearest,
+        DistFn &&comp_dist)
     {
         for (;;)
         {
@@ -197,7 +208,7 @@ namespace acorn
 
                 if (filter_map[v])
                 {
-                    float dist_v = compute_dist(query, xb, d, metric, v);
+                    float dist_v = comp_dist(v);
                     if (dist_v < d_nearest || !filter_map[nearest])
                     {
                         nearest = v;
@@ -221,7 +232,7 @@ namespace acorn
                         if (filter_map[v2])
                         {
                             num_found++;
-                            float dist_v2 = compute_dist(query, xb, d, metric, v2);
+                            float dist_v2 = comp_dist(v2);
                             if (dist_v2 < d_nearest || !filter_map[nearest])
                             {
                                 nearest = v2;
@@ -355,12 +366,17 @@ namespace acorn
         std::vector<SearchNeighbor> pool(L + 1);
         int pool_size = 0;
         std::vector<bool> visited(ntotal, false);
+        auto comp_dist = [&](int v)
+        {
+            g_ser_ndis++;
+            return compute_dist(query, xb, d, metric, v);
+        };
 
         // Phase 1: greedy descent
         int nearest = entry_point;
-        float d_nearest = compute_dist(query, xb, d, metric, nearest);
+        float d_nearest = comp_dist(nearest);
         for (int lvl = max_level; lvl >= 1; lvl--)
-            greedy_update(*this, query, xb, d, metric, filter_map, lvl, nearest, d_nearest);
+            greedy_update(*this, filter_map, lvl, nearest, d_nearest, comp_dist);
 
         // Phase 2: init pool with nearest and its level-0 neighbors
         visited[nearest] = true;
@@ -379,7 +395,7 @@ namespace acorn
             if (visited[v])
                 continue;
             visited[v] = true;
-            float dv = compute_dist(query, xb, d, metric, v);
+            float dv = comp_dist(v);
             InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(v, dv, true));
         }
 
@@ -388,8 +404,7 @@ namespace acorn
         {
             int next_cur = expand_level0_filtered(
                 *this, cur, pool.data(), pool_size, L, visited, filter_map,
-                [&](int v)
-                { return compute_dist(query, xb, d, metric, v); });
+                comp_dist);
             if (next_cur <= cur)
                 cur = next_cur;
             else
@@ -432,7 +447,7 @@ namespace acorn
         int nearest = entry_point;
         float d_nearest = comp_dist(nearest);
         for (int lvl = max_level; lvl >= 1; lvl--)
-            greedy_update(*this, query, xb, d, metric, filter_map, lvl, nearest, d_nearest);
+            greedy_update(*this, filter_map, lvl, nearest, d_nearest, comp_dist);
 
         // Phase 2: init
         visited[nearest] = true;
@@ -583,6 +598,8 @@ namespace acorn
         if (ntotal <= 0)
             return 0;
 
+        double t0 = omp_get_wtime();
+
         auto comp_dist = [&](int v)
         { return compute_dist(query, xb, d, metric, v); };
 
@@ -590,7 +607,7 @@ namespace acorn
         int nearest = entry_point;
         float d_nearest = comp_dist(nearest);
         for (int lvl = max_level; lvl >= 1; lvl--)
-            greedy_update(*this, query, xb, d, metric, filter_map, lvl, nearest, d_nearest);
+            greedy_update(*this, filter_map, lvl, nearest, d_nearest, comp_dist);
 
         // Phase 2: collect batch from nearest + its level-0 neighbors
         std::vector<bool> visited(ntotal, false);
@@ -627,6 +644,8 @@ namespace acorn
         std::vector<SearchNeighbor> shared_pool(L + 1);
         int shared_size = 0;
         std::vector<size_t> thread_ndis(num_threads, 0);
+
+        double t1 = omp_get_wtime();
 
 #pragma omp parallel num_threads(num_threads)
         {
@@ -665,6 +684,8 @@ namespace acorn
                                SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
         }
 
+        double t2 = omp_get_wtime();
+
         if ((int)g_thread_ndis_total.size() < num_threads)
             g_thread_ndis_total.resize(num_threads, 0);
         for (int t = 0; t < num_threads; t++)
@@ -676,6 +697,12 @@ namespace acorn
             indices[i] = shared_pool[i].id;
             distances[i] = shared_pool[i].distance;
         }
+
+        double t3 = omp_get_wtime();
+        g_nosync_timing.phase1 += (t1 - t0) * 1000.0;
+        g_nosync_timing.parallel += (t2 - t1) * 1000.0;
+        g_nosync_timing.merge += (t3 - t2) * 1000.0;
+
         return out_n;
     }
 
@@ -699,6 +726,8 @@ namespace acorn
         if (ntotal <= 0)
             return 0;
 
+        double t0 = omp_get_wtime();
+
         auto comp_dist = [&](int v)
         { return compute_dist(query, xb, d, metric, v); };
 
@@ -706,7 +735,7 @@ namespace acorn
         int nearest = entry_point;
         float d_nearest = comp_dist(nearest);
         for (int lvl = max_level; lvl >= 1; lvl--)
-            greedy_update(*this, query, xb, d, metric, filter_map, lvl, nearest, d_nearest);
+            greedy_update(*this, filter_map, lvl, nearest, d_nearest, comp_dist);
 
         std::vector<bool> visited(ntotal, false);
         visited[nearest] = true;
@@ -752,6 +781,8 @@ namespace acorn
         int shared_size = 0;
         if (L <= 50)
             election_hops = std::max(1, L - 5);
+
+        double t1 = omp_get_wtime();
 
 #pragma omp parallel num_threads(num_threads)
         {
@@ -823,6 +854,9 @@ namespace acorn
                 InsertIntoPool(shared_pool.data(), shared_size, L,
                                SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
         }
+
+        double t2 = omp_get_wtime();
+
         if ((int)g_thread_ndis_total.size() < num_threads)
             g_thread_ndis_total.resize(num_threads, 0);
         for (int t = 0; t < num_threads; t++)
@@ -834,6 +868,12 @@ namespace acorn
             indices[i] = shared_pool[i].id;
             distances[i] = shared_pool[i].distance;
         }
+
+        double t3 = omp_get_wtime();
+        g_scatter_timing.phase1 += (t1 - t0) * 1000.0;
+        g_scatter_timing.parallel += (t2 - t1) * 1000.0;
+        g_scatter_timing.merge += (t3 - t2) * 1000.0;
+
         return out_n;
     }
 
@@ -1015,18 +1055,23 @@ namespace acorn
             auto res_top = [&]() -> const std::pair<float, int> &
             { return res_heap.front(); };
 
-            // candidates: max-heap (farthest at top) for BFS frontier
+            // candidates: min-heap (nearest at top) for BFS frontier
             std::vector<std::pair<float, int>> cand_heap;
+            auto cand_cmp = [](const std::pair<float, int> &a,
+                               const std::pair<float, int> &b)
+            {
+                return a.first > b.first;
+            };
             auto cand_push = [&](float dist, int id)
             {
                 cand_heap.emplace_back(dist, id);
-                std::push_heap(cand_heap.begin(), cand_heap.end());
+                std::push_heap(cand_heap.begin(), cand_heap.end(), cand_cmp);
             };
             auto cand_top = [&]() -> const std::pair<float, int> &
             { return cand_heap.front(); };
             auto cand_pop = [&]()
             {
-                std::pop_heap(cand_heap.begin(), cand_heap.end());
+                std::pop_heap(cand_heap.begin(), cand_heap.end(), cand_cmp);
                 cand_heap.pop_back();
             };
 
@@ -1240,9 +1285,9 @@ namespace acorn
         int metric = (metric_type == METRIC_INNER_PRODUCT) ? 0 : 1;
         const float *xb = get_xb();
 
-        max_level = prepare_level_tab(n, false);
+        int batch_max_level = prepare_level_tab(n, false);
         if (verbose)
-            printf("  max_level = %d\n", max_level);
+            printf("  max_level = %d\n", batch_max_level);
 
         // Init locks
         std::vector<omp_lock_t> locks(ntotal);

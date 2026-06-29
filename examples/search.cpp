@@ -251,11 +251,11 @@ int main(int argc, char *argv[])
             int *lbl = ser_labels.data() + i * search_k;
             float *dst = ser_dist.data() + i * search_k;
 
-            double tq = -get_ms();
             int ql = query_labels[i];
             std::vector<char> wf(index.ntotal, 0);
             for (int id : label_to_ids[ql])
                 wf[id] = 1;
+            double tq = -get_ms();
             index.search(q, index.get_xb(), index.d, metric,
                          search_k, ef, lbl, dst, wf.data());
             ser_time += tq + get_ms();
@@ -292,11 +292,11 @@ int main(int argc, char *argv[])
             int *lbl = iqan_labels.data() + i * search_k;
             float *dst = iqan_dist.data() + i * search_k;
 
-            double tq = -get_ms();
             int ql = query_labels[i];
             std::vector<char> wf(index.ntotal, 0);
             for (int id : label_to_ids[ql])
                 wf[id] = 1;
+            double tq = -get_ms();
             index.iqan_search(q, index.get_xb(), index.d, metric,
                               search_k, efs, lbl, dst,
                               num_threads, wf.data());
@@ -338,17 +338,18 @@ int main(int argc, char *argv[])
         printf("\n--- No-Sync Search (%d queries, threads=%d, efs=%d) ---\n",
                num_queries, num_threads, efs);
         acorn::reset_thread_ndis(num_threads);
+        acorn::reset_phase_timing();
         for (int i = 0; i < num_queries; i++)
         {
             const float *q = queries.data() + i * qd;
             int *lbl = nosync_labels.data() + i * search_k;
             float *dst = nosync_dist.data() + i * search_k;
 
-            double tq = -get_ms();
             int ql = query_labels[i];
             std::vector<char> wf(index.ntotal, 0);
             for (int id : label_to_ids[ql])
                 wf[id] = 1;
+            double tq = -get_ms();
             index.no_sync_search(q, index.get_xb(), index.d, metric,
                                  search_k, efs, lbl, dst,
                                  num_threads, wf.data());
@@ -367,6 +368,11 @@ int main(int argc, char *argv[])
                 sum += nd;
             }
             printf(" (total=%zu)\n", sum);
+        }
+        {
+            const auto &pt = acorn::get_nosync_timing();
+            printf("  Phases: phase1=%.1f ms parallel=%.1f ms merge=%.1f ms\n",
+                   pt.phase1, pt.parallel, pt.merge);
         }
         if (gt_file)
         {
@@ -390,6 +396,7 @@ int main(int argc, char *argv[])
         printf("\n--- ScatterSearch (%d queries, threads=%d, efs=%d, Helec=%d) ---\n",
                num_queries, num_threads, efs, Helec);
         acorn::reset_thread_ndis(num_threads);
+        acorn::reset_phase_timing();
         for (int i = 0; i < num_queries; i++)
         {
             const float *q = queries.data() + i * qd;
@@ -414,8 +421,17 @@ int main(int argc, char *argv[])
             auto &tnd = acorn::get_thread_ndis();
             printf("  NDC per-thread:");
             size_t sum = 0;
-            for (size_t nd : tnd) { printf(" %zu", nd); sum += nd; }
+            for (size_t nd : tnd)
+            {
+                printf(" %zu", nd);
+                sum += nd;
+            }
             printf(" (total=%zu)\n", sum);
+        }
+        {
+            const auto &pt = acorn::get_scatter_timing();
+            printf("  Phases: phase1=%.1f ms parallel=%.1f ms merge=%.1f ms\n",
+                   pt.phase1, pt.parallel, pt.merge);
         }
         if (gt_file)
         {

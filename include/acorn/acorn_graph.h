@@ -106,4 +106,10 @@ namespace acorn
     const std::vector<size_t> &get_thread_ndis();
     size_t get_ser_ndis();
 
+    // Phase timing for no_sync / scatter comparison
+    struct PhaseTiming { double phase1 = 0, parallel = 0, merge = 0; };
+    void reset_phase_timing();
+    const PhaseTiming &get_nosync_timing();
+    const PhaseTiming &get_scatter_timing();
+
 } // namespace acorn

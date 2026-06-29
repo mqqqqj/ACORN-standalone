@@ -18,22 +18,22 @@ BIN="$PROJ_DIR/build/build_index"
 # METRIC="${METRIC:-l2}"
 
 # LAION10M
-BASE="${BASE:-/dataset/LAION/LAION_base_imgemb_10M.fbin}"
-LABELS="${LABELS:-$PROJ_DIR/data/laion10m/base_labels_uniform_n10.ibin}"
-OUTPUT="${OUTPUT:-$PROJ_DIR/data/laion10m/acorn_laion10m_efc500.faiss_index}"
-M="${M:-32}"
-GAMMA="${GAMMA:-12}"
-EFC="${EFC:-500}"
-METRIC="${METRIC:-ip}"
-
-# DEEP10M
-# BASE="${BASE:-/dataset/DEEP10M/base.fbin}"
-# LABELS="${LABELS:-$PROJ_DIR/data/deep10m/base_labels_uniform_n10.ibin}"
-# OUTPUT="${OUTPUT:-$PROJ_DIR/data/deep10m/acorn_deep10m_efc500.faiss_index}"
+# BASE="${BASE:-/dataset/LAION/LAION_base_imgemb_10M.fbin}"
+# LABELS="${LABELS:-$PROJ_DIR/data/laion10m/base_labels_uniform_n10.ibin}"
+# OUTPUT="${OUTPUT:-$PROJ_DIR/data/laion10m/acorn_laion10m_efc500.faiss_index}"
 # M="${M:-32}"
 # GAMMA="${GAMMA:-12}"
 # EFC="${EFC:-500}"
 # METRIC="${METRIC:-ip}"
+
+# DEEP10M
+BASE="${BASE:-/dataset/DEEP10M/base.fbin}"
+LABELS="${LABELS:-$PROJ_DIR/data/deep10m/base_labels_uniform_n10.ibin}"
+OUTPUT="${OUTPUT:-$PROJ_DIR/data/deep10m/acorn_deep10m_efc500.index}"
+M="${M:-32}"
+GAMMA="${GAMMA:-12}"
+EFC="${EFC:-500}"
+METRIC="${METRIC:-ip}"
 
 echo "============================================"
 echo "  Build ACORN Index"
