@@ -37,11 +37,11 @@ static double compute_recall(int nq, int k, int gt_k,
     return (double)total_hits / (nq * k);
 }
 
-static void check_filter(int nq, int k,
-                         const std::vector<int> &results,
-                         const std::vector<int> &query_labels,
-                         const std::vector<int> &base_labels,
-                         int *out_ok, int *out_empty, int *out_wrong)
+static void check_result_filter(int nq, int k,
+                                const std::vector<int> &results,
+                                const std::vector<int> &query_labels,
+                                const std::vector<int> &base_labels,
+                                int *out_ok, int *out_empty, int *out_wrong)
 {
     int ok = 0, empty = 0, wrong = 0;
     for (int i = 0; i < nq; i++)
@@ -82,7 +82,9 @@ static void usage(const char *prog)
             "  --ef <int>         Serial efSearch (default: 200)\n"
             "  --threads <int>    Number of threads for parallel search (default: 4)\n"
             "  --efs <int>        Parallel search pool size (default: 100)\n"
-            "  --mode <name>      Search mode: all|serial|iqan|nosync|scatter (default: all)\n"
+            "  --filter-cost <n>  Synthetic work per filter check (default: 0)\n"
+            "  --post-lambda <n>  Post-filter candidate multiplier (default: 5)\n"
+            "  --mode <name>      Search mode: all|serial|pre|post|pre_parallel|post_parallel|iqan|nosync|scatter (default: all)\n"
             "  --nq <int>         Max queries to run (default: all)\n"
             "\n"
             "Example:\n"
@@ -104,6 +106,8 @@ int main(int argc, char *argv[])
     const char *gt_file = NULL;
     const char *mode = "all";
     int k = 100, ef = 400, num_threads = 4, efs = 100, Helec = 50;
+    int filter_check_cost = 0;
+    int post_lambda = 5;
     int num_queries = -1;
 
     for (int i = 1; i < argc; i++)
@@ -126,6 +130,10 @@ int main(int argc, char *argv[])
             num_threads = atoi(argv[++i]);
         else if (strcmp(argv[i], "--efs") == 0 && i + 1 < argc)
             efs = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--filter-cost") == 0 && i + 1 < argc)
+            filter_check_cost = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--post-lambda") == 0 && i + 1 < argc)
+            post_lambda = atoi(argv[++i]);
         else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc)
             mode = argv[++i];
         else if (strcmp(argv[i], "--nq") == 0 && i + 1 < argc)
@@ -144,11 +152,22 @@ int main(int argc, char *argv[])
     if (!index_file || !query_file || !label_file || !qlabel_file)
         usage(argv[0]);
 
+    acorn::set_filter_check_cost(filter_check_cost);
+
     bool run_serial = strcmp(mode, "all") == 0 || strcmp(mode, "serial") == 0;
+    bool run_pre = strcmp(mode, "all") == 0 || strcmp(mode, "pre") == 0 ||
+                   strcmp(mode, "prefilter") == 0;
+    bool run_post = strcmp(mode, "all") == 0 || strcmp(mode, "post") == 0 ||
+                    strcmp(mode, "postfilter") == 0;
+    bool run_pre_parallel = strcmp(mode, "all") == 0 || strcmp(mode, "pre_parallel") == 0 ||
+                            strcmp(mode, "parallel_pre") == 0;
+    bool run_post_parallel = strcmp(mode, "all") == 0 || strcmp(mode, "post_parallel") == 0 ||
+                             strcmp(mode, "parallel_post") == 0;
     bool run_iqan = strcmp(mode, "all") == 0 || strcmp(mode, "iqan") == 0;
     bool run_nosync = strcmp(mode, "all") == 0 || strcmp(mode, "nosync") == 0;
     bool run_scatter = strcmp(mode, "all") == 0 || strcmp(mode, "scatter") == 0;
-    if (!run_serial && !run_iqan && !run_nosync && !run_scatter)
+    if (!run_serial && !run_pre && !run_post && !run_pre_parallel && !run_post_parallel &&
+        !run_iqan && !run_nosync && !run_scatter)
     {
         fprintf(stderr, "Unknown mode: %s\n", mode);
         usage(argv[0]);
@@ -159,8 +178,8 @@ int main(int argc, char *argv[])
     printf("Query:  %s\n", query_file);
     if (gt_file)
         printf("GT:     %s\n", gt_file);
-    printf("Params: k=%d, ef=%d, threads=%d, efs=%d, nq=%d, mode=%s\n\n",
-           k, ef, num_threads, efs, num_queries, mode);
+    printf("Params: k=%d, ef=%d, threads=%d, efs=%d, nq=%d, mode=%s, filter_cost=%d, post_lambda=%d\n\n",
+           k, ef, num_threads, efs, num_queries, mode, filter_check_cost, post_lambda);
 
     // Load base labels first (needed for load_from_faiss)
     std::vector<int> base_labels;
@@ -172,7 +191,7 @@ int main(int argc, char *argv[])
     printf("Loading index ...\n");
     double t0 = get_ms();
     acorn::ACORN index;
-    index.load_from_faiss(index_file, base_labels);
+    index.load_from_faiss(index_file);
     printf("  ntotal=%ld, d=%d, M=%d (%.0f ms)\n",
            index.ntotal, index.d, index.M, get_ms() - t0);
 
@@ -237,7 +256,7 @@ int main(int argc, char *argv[])
     }
     printf("  Done.\n");
 
-    std::vector<int> ser_labels(search_k * num_queries);
+    std::vector<int> ser_labels(search_k * num_queries, -1);
     std::vector<float> ser_dist(search_k * num_queries);
     double ser_time = 0;
     if (run_serial)
@@ -270,14 +289,210 @@ int main(int argc, char *argv[])
         }
         {
             int ok, empty, wrong;
-            check_filter(num_queries, search_k, ser_labels, query_labels, base_labels,
-                         &ok, &empty, &wrong);
+            check_result_filter(num_queries, search_k, ser_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
+            printf("  Filter: ok=%d -1=%d wrong=%d\n", ok, empty, wrong);
+        }
+    }
+
+    // --- Pre-filter brute-force search ---
+    std::vector<int> pre_labels(search_k * num_queries, -1);
+    std::vector<float> pre_dist(search_k * num_queries);
+    double pre_time = 0;
+    if (run_pre)
+    {
+        printf("\n--- Pre-Filter Brute-Force Search (%d queries) ---\n", num_queries);
+        acorn::reset_ser_ndis();
+        for (int i = 0; i < num_queries; i++)
+        {
+            const float *q = queries.data() + i * qd;
+            int *lbl = pre_labels.data() + i * search_k;
+            float *dst = pre_dist.data() + i * search_k;
+
+            int ql = query_labels[i];
+            std::vector<char> wf(index.ntotal, 0);
+            for (int id : label_to_ids[ql])
+                wf[id] = 1;
+            double tq = -get_ms();
+            index.pre_filter_search(q, index.get_xb(), index.d, metric,
+                                    search_k, lbl, dst, wf.data());
+            pre_time += tq + get_ms();
+        }
+        printf("  Time: %.1f ms, Avg: %.3f ms/q\n", pre_time, pre_time / num_queries);
+        printf("  NDC:  total=%zu avg/q=%.0f\n",
+               acorn::get_ser_ndis(), (double)acorn::get_ser_ndis() / num_queries);
+
+        if (gt_file)
+        {
+            double r = compute_recall(num_queries, search_k, gt_k, gt_ids, pre_labels);
+            printf("  Recall@%d: %.4f\n", k, r);
+        }
+        {
+            int ok, empty, wrong;
+            check_result_filter(num_queries, search_k, pre_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
+            printf("  Filter: ok=%d -1=%d wrong=%d\n", ok, empty, wrong);
+        }
+    }
+
+    // --- Parallel pre-filter brute-force search ---
+    std::vector<int> pre_parallel_labels(search_k * num_queries, -1);
+    std::vector<float> pre_parallel_dist(search_k * num_queries);
+    double pre_parallel_time = 0;
+    if (run_pre_parallel)
+    {
+        printf("\n--- Parallel Pre-Filter Brute-Force Search (%d queries, threads=%d) ---\n",
+               num_queries, num_threads);
+        acorn::reset_thread_ndis(num_threads);
+        for (int i = 0; i < num_queries; i++)
+        {
+            const float *q = queries.data() + i * qd;
+            int *lbl = pre_parallel_labels.data() + i * search_k;
+            float *dst = pre_parallel_dist.data() + i * search_k;
+
+            int ql = query_labels[i];
+            std::vector<char> wf(index.ntotal, 0);
+            for (int id : label_to_ids[ql])
+                wf[id] = 1;
+            double tq = -get_ms();
+            index.parallel_pre_filter_search(q, index.get_xb(), index.d, metric,
+                                             search_k, lbl, dst,
+                                             num_threads, wf.data());
+            pre_parallel_time += tq + get_ms();
+        }
+        printf("  Time: %.1f ms, Avg: %.3f ms/q\n",
+               pre_parallel_time, pre_parallel_time / num_queries);
+        if (pre_time > 0)
+            printf("  Speedup: %.2fx\n", pre_time / pre_parallel_time);
+        {
+            auto &tnd = acorn::get_thread_ndis();
+            printf("  NDC per-thread:");
+            size_t sum = 0;
+            for (size_t nd : tnd)
+            {
+                printf(" %zu", nd);
+                sum += nd;
+            }
+            printf(" (total=%zu)\n", sum);
+        }
+
+        if (gt_file)
+        {
+            double r = compute_recall(num_queries, search_k, gt_k, gt_ids, pre_parallel_labels);
+            printf("  Recall@%d: %.4f\n", k, r);
+        }
+        {
+            int ok, empty, wrong;
+            check_result_filter(num_queries, search_k, pre_parallel_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
+            printf("  Filter: ok=%d -1=%d wrong=%d\n", ok, empty, wrong);
+        }
+    }
+
+    // --- Post-filter graph search ---
+    std::vector<int> post_labels(search_k * num_queries, -1);
+    std::vector<float> post_dist(search_k * num_queries);
+    double post_time = 0;
+    if (run_post)
+    {
+        printf("\n--- Post-Filter Search (%d queries, ef=%d, lambda=%d) ---\n",
+               num_queries, ef, post_lambda);
+        acorn::reset_ser_ndis();
+        for (int i = 0; i < num_queries; i++)
+        {
+            const float *q = queries.data() + i * qd;
+            int *lbl = post_labels.data() + i * search_k;
+            float *dst = post_dist.data() + i * search_k;
+
+            int ql = query_labels[i];
+            std::vector<char> wf(index.ntotal, 0);
+            for (int id : label_to_ids[ql])
+                wf[id] = 1;
+            double tq = -get_ms();
+            index.post_filter_search(q, index.get_xb(), index.d, metric,
+                                     search_k, ef, post_lambda, lbl, dst, wf.data());
+            post_time += tq + get_ms();
+        }
+        printf("  Time: %.1f ms, Avg: %.3f ms/q\n", post_time, post_time / num_queries);
+        printf("  NDC:  total=%zu avg/q=%.0f\n",
+               acorn::get_ser_ndis(), (double)acorn::get_ser_ndis() / num_queries);
+        if (ser_time > 0)
+            printf("  Speedup: %.2fx\n", ser_time / post_time);
+
+        if (gt_file)
+        {
+            double r = compute_recall(num_queries, search_k, gt_k, gt_ids, post_labels);
+            printf("  Recall@%d: %.4f\n", k, r);
+        }
+        {
+            int ok, empty, wrong;
+            check_result_filter(num_queries, search_k, post_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
+            printf("  Filter: ok=%d -1=%d wrong=%d\n", ok, empty, wrong);
+        }
+    }
+
+    // --- Parallel post-filter graph search ---
+    std::vector<int> post_parallel_labels(search_k * num_queries, -1);
+    std::vector<float> post_parallel_dist(search_k * num_queries);
+    double post_parallel_time = 0;
+    if (run_post_parallel)
+    {
+        printf("\n--- Parallel Post-Filter Search (%d queries, threads=%d, efs=%d, Helec=%d, lambda=%d) ---\n",
+               num_queries, num_threads, efs, Helec, post_lambda);
+        acorn::reset_thread_ndis(num_threads);
+        acorn::reset_phase_timing();
+        for (int i = 0; i < num_queries; i++)
+        {
+            const float *q = queries.data() + i * qd;
+            int *lbl = post_parallel_labels.data() + i * search_k;
+            float *dst = post_parallel_dist.data() + i * search_k;
+
+            int ql = query_labels[i];
+            std::vector<char> wf(index.ntotal, 0);
+            for (int id : label_to_ids[ql])
+                wf[id] = 1;
+            double tq = -get_ms();
+            index.parallel_post_filter_search(q, index.get_xb(), index.d, metric,
+                                              search_k, efs, post_lambda, lbl, dst,
+                                              num_threads, Helec, wf.data());
+            post_parallel_time += tq + get_ms();
+        }
+        printf("  Time: %.1f ms, Avg: %.3f ms/q\n",
+               post_parallel_time, post_parallel_time / num_queries);
+        if (post_time > 0)
+            printf("  Speedup: %.2fx\n", post_time / post_parallel_time);
+        {
+            auto &tnd = acorn::get_thread_ndis();
+            printf("  NDC per-thread:");
+            size_t sum = 0;
+            for (size_t nd : tnd)
+            {
+                printf(" %zu", nd);
+                sum += nd;
+            }
+            printf(" (total=%zu)\n", sum);
+        }
+        {
+            const auto &pt = acorn::get_scatter_timing();
+            printf("  Phases: phase1=%.1f ms parallel=%.1f ms merge=%.1f ms\n",
+                   pt.phase1, pt.parallel, pt.merge);
+        }
+        if (gt_file)
+        {
+            double r = compute_recall(num_queries, search_k, gt_k, gt_ids, post_parallel_labels);
+            printf("  Recall@%d: %.4f\n", k, r);
+        }
+        {
+            int ok, empty, wrong;
+            check_result_filter(num_queries, search_k, post_parallel_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
             printf("  Filter: ok=%d -1=%d wrong=%d\n", ok, empty, wrong);
         }
     }
 
     // --- iQAN search ---
-    std::vector<int> iqan_labels(search_k * num_queries);
+    std::vector<int> iqan_labels(search_k * num_queries, -1);
     std::vector<float> iqan_dist(search_k * num_queries);
     double iqan_time = 0;
     if (run_iqan)
@@ -322,14 +537,14 @@ int main(int argc, char *argv[])
         }
         {
             int ok, empty, wrong;
-            check_filter(num_queries, search_k, iqan_labels, query_labels, base_labels,
-                         &ok, &empty, &wrong);
+            check_result_filter(num_queries, search_k, iqan_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
             printf("  Filter: ok=%d -1=%d wrong=%d\n", ok, empty, wrong);
         }
     }
 
     // --- No-sync search ---
-    std::vector<int> nosync_labels(search_k * num_queries);
+    std::vector<int> nosync_labels(search_k * num_queries, -1);
     std::vector<float> nosync_dist(search_k * num_queries);
     double nosync_time = 0;
     if (run_nosync)
@@ -380,14 +595,14 @@ int main(int argc, char *argv[])
         }
         {
             int ok, empty, wrong;
-            check_filter(num_queries, search_k, nosync_labels, query_labels, base_labels,
-                         &ok, &empty, &wrong);
+            check_result_filter(num_queries, search_k, nosync_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
             printf("  Filter: ok=%d -1=%d wrong=%d\n", ok, empty, wrong);
         }
     }
 
     // --- ScatterSearch ---
-    std::vector<int> scatter_labels(search_k * num_queries);
+    std::vector<int> scatter_labels(search_k * num_queries, -1);
     std::vector<float> scatter_dist(search_k * num_queries);
     double scatter_time = 0;
     if (run_scatter)
@@ -439,8 +654,8 @@ int main(int argc, char *argv[])
         }
         {
             int ok, empty, wrong;
-            check_filter(num_queries, search_k, scatter_labels, query_labels, base_labels,
-                         &ok, &empty, &wrong);
+            check_result_filter(num_queries, search_k, scatter_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
             printf("  Filter: ok=%d -1=%d wrong=%d\n", ok, empty, wrong);
         }
     }
@@ -452,6 +667,24 @@ int main(int argc, char *argv[])
         printf("Serial:       time=%.1f ms", ser_time);
         if (gt_file)
             printf(", recall=%.4f", compute_recall(num_queries, search_k, gt_k, gt_ids, ser_labels));
+        printf("\n");
+        printf("Pre-Filter:   time=%.1f ms", pre_time);
+        if (gt_file)
+            printf(", recall=%.4f", compute_recall(num_queries, search_k, gt_k, gt_ids, pre_labels));
+        printf("\n");
+        printf("Post-Filter:  time=%.1f ms", post_time);
+        if (gt_file)
+            printf(", recall=%.4f", compute_recall(num_queries, search_k, gt_k, gt_ids, post_labels));
+        printf("\n");
+        printf("Pre-Filter-P: time=%.1f ms", pre_parallel_time);
+        if (gt_file)
+            printf(", recall=%.4f",
+                   compute_recall(num_queries, search_k, gt_k, gt_ids, pre_parallel_labels));
+        printf("\n");
+        printf("Post-Filter-P: time=%.1f ms", post_parallel_time);
+        if (gt_file)
+            printf(", recall=%.4f",
+                   compute_recall(num_queries, search_k, gt_k, gt_ids, post_parallel_labels));
         printf("\n");
         printf("iQAN:         time=%.1f ms, speedup=%.2fx", iqan_time, ser_time / iqan_time);
         if (gt_file)

@@ -24,3 +24,4 @@ cmake-build-*/
 
 # PDF
 *.pdf
+*.docx

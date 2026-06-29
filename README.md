@@ -8,7 +8,7 @@ metadata, and run filtered graph search.
 ## What Is Included
 
 - FAISS ACORN graph loader: `ACORN::load_from_faiss(...)`
-- Serial filtered graph search
+- Serial in-filter, pre-filter, and post-filter search
 - Intra-query parallel search modes: `iqan`, `nosync`, and `scatter`
 - Label generation and brute-force filtered ground-truth utilities
 - Filter-radius analysis utility
@@ -77,6 +77,8 @@ There is no `build_index` target in this repository.
   --ef 400 \
   --threads 8 \
   --efs 200 \
+  --filter-cost 0 \
+  --post-lambda 5 \
   --mode serial
 ```
 
@@ -84,7 +86,11 @@ Search modes:
 
 | Mode | Description |
 |------|-------------|
-| `serial` | Single-threaded filtered search |
+| `serial` | Single-threaded in-filter graph search |
+| `pre` | Pre-filter brute-force search over accepted ids |
+| `post` | Unfiltered serial graph search, then filter candidates to top-k |
+| `pre_parallel` | Parallel pre-filter brute-force search over id-range chunks |
+| `post_parallel` | `no_filter_scatter_search` for candidates, then filter to top-k |
 | `iqan` | Sync-and-redistribute intra-query parallel search |
 | `nosync` | Independent per-thread search with final merge |
 | `scatter` | Leader-guided parallel search |
@@ -100,8 +106,15 @@ LABELS=/path/to/base_labels.ibin \
 QLABELS=/path/to/query_labels.ibin \
 GT=/path/to/gt_filtered.ibin \
 MODE=serial \
+FILTER_COST=0 \
+POST_LAMBDA=5 \
 ./scripts/search.sh
 ```
+
+`--filter-cost` controls synthetic work inside `acorn::check_filter(...)` for
+simulating different predicate-check costs. The default is `0`.
+`--post-lambda` controls how many candidates post-filter search retrieves before
+filtering: `candidate_k = min(ntotal, post_lambda * k)`. The default is `5`.
 
 ## C++ Usage
 
