@@ -10,6 +10,7 @@ BIN="$PROJ_DIR/build/compute_filtered_gt"
 
 K="${K:-100}"
 METRIC="${METRIC:-ip}"
+NQ="${NQ:-1000}"
 # SIFT1M
 # BASE="${BASE:-/dataset/SIFT1M/sift_base.fbin}"
 # QUERY="${QUERY:-/dataset/SIFT1M/sift_query.fbin}"
@@ -37,7 +38,7 @@ echo "Query:        $QUERY"
 echo "Base labels:  $BASE_LABELS"
 echo "Query labels: $QUERY_LABELS"
 echo "Output:       $OUTPUT"
-echo "k=$K, metric=$METRIC"
+echo "k=$K, metric=$METRIC, nq=$NQ"
 echo
 
 mkdir -p "$(dirname "$OUTPUT")"
@@ -48,4 +49,5 @@ mkdir -p "$(dirname "$OUTPUT")"
     --query-labels "$QUERY_LABELS" \
     --output "$OUTPUT" \
     --k "$K" \
+    --nq "$NQ" \
     --metric "$METRIC"

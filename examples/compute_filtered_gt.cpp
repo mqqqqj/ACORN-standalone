@@ -34,6 +34,7 @@ static void usage(const char *prog)
             "\n"
             "Options:\n"
             "  --k <int>             Number of nearest neighbors (default: 100)\n"
+            "  --nq <int>            Use first nq queries only\n"
             "  --metric <l2|ip>      Distance metric (default: l2)\n",
             prog);
     exit(1);
@@ -64,6 +65,8 @@ int main(int argc, char *argv[])
             output_file = argv[++i];
         else if (strcmp(argv[i], "--k") == 0 && i + 1 < argc)
             k = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--nq") == 0 && i + 1 < argc)
+            num_queries = atoi(argv[++i]);
         else if (strcmp(argv[i], "--metric") == 0 && i + 1 < argc)
         {
             const char *m = argv[++i];
@@ -104,6 +107,7 @@ int main(int argc, char *argv[])
     auto qr = acorn::read_fbin(query_file);
     std::vector<float> queries = std::move(qr.first);
     int nq_all = qr.second.first, qd = qr.second.second;
+    int nq_total = nq_all;
     printf("  nq=%d, d=%d (%.0f ms)\n", nq_all, qd, get_ms() - t0);
     if (qd != d)
     {
@@ -121,7 +125,7 @@ int main(int argc, char *argv[])
     printf("  %zu labels\n", bl.size());
 
     printf("Loading query labels: %s\n", query_labels);
-    std::vector<int> ql = acorn::read_ibin(query_labels, nq_all);
+    std::vector<int> ql = acorn::read_ibin(query_labels, nq_total);
     printf("  %zu labels\n", ql.size());
 
     // Pre-index by label
