@@ -2,7 +2,7 @@
 build/
 data/
 cmake-build-*/
-
+results/
 # Compiled output
 *.o
 *.a

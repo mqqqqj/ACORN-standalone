@@ -53,6 +53,11 @@ namespace acorn
                    int *indices, float *distances,
                    const char *filter_map) const;
 
+        // --- Raw graph search without filter checks ---
+        int no_filter_search(const float *query, const float *xb, int d, int metric,
+                             int k, int efSearch_val,
+                             int *indices, float *distances) const;
+
         // --- Pre-filter search: brute-force over ids accepted by filter_map ---
         int pre_filter_search(const float *query, const float *xb, int d, int metric,
                               int k,
@@ -68,22 +73,35 @@ namespace acorn
 
         // --- Post-filter search: unfiltered graph search, then filter top candidates ---
         int post_filter_search(const float *query, const float *xb, int d, int metric,
-                               int k, int efSearch_val, int post_lambda,
+                               int k, int efSearch_val,
                                int *indices, float *distances,
                                const char *filter_map) const;
 
         // --- Parallel post-filter search: scatter search without filter, then filter candidates ---
         int parallel_post_filter_search(const float *query, const float *xb, int d, int metric,
-                                        int k, int efSearch_val, int post_lambda,
+                                        int k, int efSearch_val,
                                         int *indices, float *distances,
                                         int num_threads, int Helec,
                                         const char *filter_map) const;
+
+        // --- Parallel post-filter search: iQAN without filter, then filter candidates ---
+        int parallel_post_filter_iqan_search(const float *query, const float *xb, int d, int metric,
+                                             int k, int efSearch_val,
+                                             int *indices, float *distances,
+                                             int num_threads,
+                                             const char *filter_map) const;
 
         // --- iQAN search (sync-and-redistribute) ---
         int iqan_search(const float *query, const float *xb, int d, int metric,
                         int k, int efSearch_val,
                         int *indices, float *distances,
                         int num_threads, const char *filter_map) const;
+
+        // --- iQAN without filter checks (for post-filter search) ---
+        int no_filter_iqan_search(const float *query, const float *xb, int d, int metric,
+                                  int k, int efSearch_val,
+                                  int *indices, float *distances,
+                                  int num_threads) const;
 
         // --- No-sync parallel search ---
         int no_sync_search(const float *query, const float *xb, int d, int metric,

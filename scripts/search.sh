@@ -17,7 +17,6 @@ NQ="${NQ:-1000}"
 MODE="${MODE:-"serial"}"
 HELEC="${HELEC:-50}"
 FILTER_COST="${FILTER_COST:-0}"
-POST_LAMBDA="${POST_LAMBDA:-10}"
 
 # SIFT1M
 # INDEX="${INDEX:-$PROJ_DIR/data/sift1m/acorn_sift1m.faiss_index}"
@@ -52,7 +51,6 @@ taskset -c 0-$((THREADS-1)) "$BIN" \
     --threads "$THREADS" \
     --efs "$EFS" \
     --filter-cost "$FILTER_COST" \
-    --post-lambda "$POST_LAMBDA" \
     --nq "$NQ" \
     --mode "$MODE" \
     --Helec "$HELEC"

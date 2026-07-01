@@ -314,11 +314,11 @@ namespace acorn
             float dv = comp_dist(v1);
             if (ndis_local)
                 (*ndis_local)++;
+            visited[v1] = true;
             bool can_enter_pool = (pool_size < L || dv < pool[L - 1].distance);
             if (can_enter_pool && check_filter(filter_map, v1))
             {
                 num_found++;
-                visited[v1] = true;
                 int r = InsertIntoPool(pool, pool_size, L,
                                        SearchNeighbor(v1, dv, true));
                 if (r < next_cur)
@@ -343,14 +343,14 @@ namespace acorn
                         continue;
 
                     float d2 = comp_dist(v2);
+                    visited[v2] = true;
                     if (ndis_local)
                         (*ndis_local)++;
+
                     bool can_enter_pool2 = (pool_size < L || d2 < pool[L - 1].distance);
                     if (!can_enter_pool2 || !check_filter(filter_map, v2))
                         continue;
-
                     num_found++;
-                    visited[v2] = true;
                     int r = InsertIntoPool(pool, pool_size, L,
                                            SearchNeighbor(v2, d2, true));
                     if (r < next_cur)
@@ -491,6 +491,72 @@ namespace acorn
         return out_n;
     }
 
+    int ACORN::no_filter_search(const float *query, const float *xb, int d, int metric,
+                                int k, int efSearch_val,
+                                int *indices, float *distances) const
+    {
+        if (entry_point == -1)
+            return 0;
+        if (entry_point >= (int)(offsets.size() - 1))
+            return 0;
+
+        int L = std::max(efSearch_val, k);
+        int ntotal = (int)(offsets.size() - 1);
+        if (ntotal <= 0)
+            return 0;
+
+        std::vector<SearchNeighbor> pool(L + 1);
+        int pool_size = 0;
+        std::vector<bool> visited(ntotal, false);
+        auto comp_dist = [&](int v)
+        {
+            g_ser_ndis++;
+            return compute_dist(query, xb, d, metric, v);
+        };
+
+        int nearest = entry_point;
+        float d_nearest = comp_dist(nearest);
+        for (int lvl = max_level; lvl >= 1; lvl--)
+            greedy_update_unfiltered(*this, lvl, nearest, d_nearest, comp_dist);
+
+        visited[nearest] = true;
+        InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(nearest, d_nearest, true));
+
+        size_t begin, end;
+        neighbor_range(nearest, 0, &begin, &end);
+        for (size_t j = begin; j < end; j++)
+        {
+            int v = neighbors[j];
+            if (v < 0)
+                break;
+            if (visited[v])
+                continue;
+            visited[v] = true;
+            float dv = comp_dist(v);
+            InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(v, dv, true));
+        }
+
+        int cur = 0;
+        while (cur < pool_size)
+        {
+            int next_cur = expand_level0_unfiltered(
+                *this, cur, pool.data(), pool_size, L, visited,
+                comp_dist);
+            if (next_cur <= cur)
+                cur = next_cur;
+            else
+                cur++;
+        }
+
+        int out_n = std::min(k, pool_size);
+        for (int i = 0; i < out_n; i++)
+        {
+            indices[i] = pool[i].id;
+            distances[i] = pool[i].distance;
+        }
+        return out_n;
+    }
+
     int ACORN::pre_filter_search(const float *query, const float *xb, int d, int metric,
                                  int k,
                                  int *indices, float *distances,
@@ -585,23 +651,18 @@ namespace acorn
     }
 
     int ACORN::post_filter_search(const float *query, const float *xb, int d, int metric,
-                                  int k, int efSearch_val, int post_lambda,
+                                  int k, int efSearch_val,
                                   int *indices, float *distances,
                                   const char *filter_map) const
     {
         int ntotal = (int)(offsets.size() - 1);
         if (entry_point == -1 || ntotal <= 0 || k <= 0 || !filter_map)
             return 0;
-        int lambda = std::max(1, post_lambda);
-        int candidate_k = std::min(ntotal, lambda * k);
-        int candidate_ef = std::max(efSearch_val, candidate_k);
+        int candidate_k = std::min(ntotal, std::max(k, efSearch_val));
         std::vector<int> candidate_ids(candidate_k, -1);
         std::vector<float> candidate_dist(candidate_k, 0.0f);
-        std::vector<char> unfiltered(ntotal, 1);
-
-        int nres = search(query, xb, d, metric, candidate_k, candidate_ef,
-                          candidate_ids.data(), candidate_dist.data(),
-                          unfiltered.data());
+        int nres = no_filter_search(query, xb, d, metric, candidate_k, candidate_k,
+                                    candidate_ids.data(), candidate_dist.data());
 
         std::vector<SearchNeighbor> pool(k + 1);
         int pool_size = 0;
@@ -624,7 +685,7 @@ namespace acorn
     }
 
     int ACORN::parallel_post_filter_search(const float *query, const float *xb, int d, int metric,
-                                           int k, int efSearch_val, int post_lambda,
+                                           int k, int efSearch_val,
                                            int *indices, float *distances,
                                            int num_threads, int Helec,
                                            const char *filter_map) const
@@ -632,15 +693,52 @@ namespace acorn
         int ntotal = (int)(offsets.size() - 1);
         if (entry_point == -1 || ntotal <= 0 || k <= 0 || !filter_map)
             return 0;
-        int lambda = std::max(1, post_lambda);
-        int candidate_k = std::min(ntotal, lambda * k);
-        int candidate_ef = std::max(efSearch_val, candidate_k);
+        int per_thread_k = std::max(k, efSearch_val);
+        int candidate_k = std::min(ntotal, std::max(k, per_thread_k * std::max(1, num_threads)));
         std::vector<int> candidate_ids(candidate_k, -1);
         std::vector<float> candidate_dist(candidate_k, 0.0f);
 
-        int nres = no_filter_scatter_search(query, xb, d, metric, candidate_k, candidate_ef,
+        int nres = no_filter_scatter_search(query, xb, d, metric, candidate_k, per_thread_k,
                                             candidate_ids.data(), candidate_dist.data(),
                                             num_threads, Helec);
+
+        std::vector<SearchNeighbor> pool(k + 1);
+        int pool_size = 0;
+        for (int i = 0; i < nres; i++)
+        {
+            int id = candidate_ids[i];
+            if (id < 0 || !check_filter(filter_map, id))
+                continue;
+            InsertIntoPool(pool.data(), pool_size, k,
+                           SearchNeighbor(id, candidate_dist[i], false));
+        }
+
+        int out_n = std::min(k, pool_size);
+        for (int i = 0; i < out_n; i++)
+        {
+            indices[i] = pool[i].id;
+            distances[i] = pool[i].distance;
+        }
+        return out_n;
+    }
+
+    int ACORN::parallel_post_filter_iqan_search(const float *query, const float *xb, int d, int metric,
+                                                int k, int efSearch_val,
+                                                int *indices, float *distances,
+                                                int num_threads,
+                                                const char *filter_map) const
+    {
+        int ntotal = (int)(offsets.size() - 1);
+        if (entry_point == -1 || ntotal <= 0 || k <= 0 || !filter_map)
+            return 0;
+        int per_thread_k = std::max(k, efSearch_val);
+        int candidate_k = std::min(ntotal, std::max(k, per_thread_k * std::max(1, num_threads)));
+        std::vector<int> candidate_ids(candidate_k, -1);
+        std::vector<float> candidate_dist(candidate_k, 0.0f);
+
+        int nres = no_filter_iqan_search(query, xb, d, metric, candidate_k, per_thread_k,
+                                         candidate_ids.data(), candidate_dist.data(),
+                                         num_threads);
 
         std::vector<SearchNeighbor> pool(k + 1);
         int pool_size = 0;
@@ -817,6 +915,156 @@ namespace acorn
         return out_n;
     }
 
+    int ACORN::no_filter_iqan_search(const float *query, const float *xb, int d, int metric,
+                                     int k, int efSearch_val,
+                                     int *indices, float *distances,
+                                     int num_threads) const
+    {
+        if (entry_point == -1)
+            return 0;
+        int L = std::max(1, efSearch_val);
+        int shared_cap = std::max(k, L);
+        int ntotal = (int)(offsets.size() - 1);
+        if (ntotal <= 0)
+            return 0;
+
+        double t0 = omp_get_wtime();
+
+        auto comp_dist = [&](int v)
+        { return compute_dist(query, xb, d, metric, v); };
+
+        int nearest = entry_point;
+        float d_nearest = comp_dist(nearest);
+        for (int lvl = max_level; lvl >= 1; lvl--)
+            greedy_update_unfiltered(*this, lvl, nearest, d_nearest, comp_dist);
+
+        std::vector<SearchNeighbor> shared_pool(shared_cap + 1);
+        int shared_size = 0;
+        std::vector<bool> visited(ntotal, false);
+        visited[nearest] = true;
+
+        std::vector<std::pair<float, int>> batch;
+        batch.emplace_back(d_nearest, nearest);
+        InsertIntoPool(shared_pool.data(), shared_size, shared_cap,
+                       SearchNeighbor(nearest, d_nearest, false));
+
+        size_t begin, end;
+        neighbor_range(nearest, 0, &begin, &end);
+        for (size_t j = begin; j < end; j++)
+        {
+            int v = neighbors[j];
+            if (v < 0)
+                break;
+            if (visited[v])
+                continue;
+            visited[v] = true;
+            float dv = comp_dist(v);
+            batch.emplace_back(dv, v);
+            InsertIntoPool(shared_pool.data(), shared_size, shared_cap,
+                           SearchNeighbor(v, dv, false));
+        }
+
+        std::vector<size_t> thread_ndis(num_threads, 0);
+        double t1 = omp_get_wtime();
+
+        while (!batch.empty())
+        {
+            int to_process = std::min(num_threads * L, (int)batch.size());
+            std::vector<std::vector<std::pair<float, int>>> thread_unexpanded(num_threads);
+            std::vector<std::vector<std::pair<float, int>>> thread_work(num_threads);
+            for (int i = 0; i < to_process; i++)
+                thread_work[i % num_threads].push_back(batch[i]);
+
+#pragma omp parallel num_threads(num_threads)
+            {
+                int tid = omp_get_thread_num();
+                size_t ndis_local = 0;
+                std::vector<SearchNeighbor> local_pool(L + 1);
+                int local_size = 0;
+                for (auto &p : thread_work[tid])
+                {
+                    InsertIntoPool(local_pool.data(), local_size, L,
+                                   SearchNeighbor(p.second, p.first, true));
+                }
+
+                int cur = 0, step = 0;
+                while (cur < local_size && step < L)
+                {
+                    bool was_expanded = local_pool[cur].expanded;
+                    int next_cur = expand_level0_unfiltered(
+                        *this, cur, local_pool.data(), local_size, L, visited,
+                        comp_dist, &ndis_local);
+                    if (was_expanded)
+                        step++;
+                    if (next_cur <= cur)
+                        cur = next_cur;
+                    else
+                        cur++;
+                }
+
+                thread_unexpanded[tid].clear();
+                for (int i = 0; i < local_size; i++)
+                    if (local_pool[i].expanded)
+                        thread_unexpanded[tid].emplace_back(local_pool[i].distance, local_pool[i].id);
+                thread_ndis[tid] += ndis_local;
+
+#pragma omp critical
+                for (int i = 0; i < local_size; i++)
+                    InsertIntoPool(shared_pool.data(), shared_size, shared_cap,
+                                   SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
+            }
+
+            batch.erase(batch.begin(), batch.begin() + to_process);
+            std::vector<std::pair<float, int>> all_unexpanded;
+            for (int t = 0; t < num_threads; t++)
+                for (auto &p : thread_unexpanded[t])
+                    all_unexpanded.push_back(p);
+
+            if (!all_unexpanded.empty())
+            {
+                if ((int)all_unexpanded.size() > L)
+                {
+                    std::nth_element(all_unexpanded.begin(),
+                                     all_unexpanded.begin() + L, all_unexpanded.end());
+                    all_unexpanded.resize(L);
+                }
+                for (auto &p : all_unexpanded)
+                    batch.push_back(p);
+            }
+
+            if (shared_size >= shared_cap && !batch.empty())
+            {
+                float min_d = batch[0].first;
+                for (auto &p : batch)
+                    if (p.first < min_d)
+                        min_d = p.first;
+                if (min_d > shared_pool[shared_size - 1].distance)
+                    batch.clear();
+            }
+        }
+
+        double t2 = omp_get_wtime();
+
+        if ((int)g_thread_ndis_total.size() < num_threads)
+            g_thread_ndis_total.resize(num_threads, 0);
+        for (int t = 0; t < num_threads; t++)
+            g_thread_ndis_total[t] += thread_ndis[t];
+
+        int out_n = std::min(k, shared_size);
+        for (int i = 0; i < out_n; i++)
+        {
+            indices[i] = shared_pool[i].id;
+            distances[i] = shared_pool[i].distance;
+        }
+
+        double t3 = omp_get_wtime();
+        g_scatter_timing.phase1 += (t1 - t0) * 1000.0;
+        g_scatter_timing.parallel += (t2 - t1) * 1000.0;
+        g_scatter_timing.merge += (t3 - t2) * 1000.0;
+
+        return out_n;
+    }
+
     // ============================================================
     // No-sync parallel search
     // ============================================================
@@ -903,7 +1151,7 @@ namespace acorn
             int cur = 0;
             while (cur < local_size)
             {
-                int next_cur = expand_level0_filtered_lazy(
+                int next_cur = expand_level0_filtered(
                     *this, cur, local_pool.data(), local_size, L, visited, filter_map,
                     comp_dist, &ndis_local);
                 if (next_cur <= cur)
@@ -1117,7 +1365,8 @@ namespace acorn
     {
         if (entry_point == -1)
             return 0;
-        int L = std::max(efSearch_val, k);
+        int L = std::max(1, efSearch_val);
+        int shared_cap = std::max(k, L);
         int ntotal = (int)(offsets.size() - 1);
         if (ntotal <= 0)
             return 0;
@@ -1158,7 +1407,7 @@ namespace acorn
         for (size_t i = 0; i < entry_points.size(); i++)
             thread_entry_points[i % num_threads].push_back(entry_points[i]);
 
-        std::vector<SearchNeighbor> shared_pool(L + 1);
+        std::vector<SearchNeighbor> shared_pool(shared_cap + 1);
         std::vector<size_t> thread_ndis(num_threads, 0);
         std::mutex elec_mutex;
         int best_thread_id = -1;
@@ -1195,7 +1444,7 @@ namespace acorn
                     break;
                 if (hop == election_hops)
                 {
-                    float distk = (local_size >= k) ? local_pool[k - 1].distance
+                    float distk = (local_size >= L) ? local_pool[L - 1].distance
                                                     : std::numeric_limits<float>::max();
                     if (distk < epsilon)
                     {
@@ -1241,7 +1490,7 @@ namespace acorn
             thread_ndis[tid] = ndis_local;
 #pragma omp critical
             for (int i = 0; i < local_size; i++)
-                InsertIntoPool(shared_pool.data(), shared_size, L,
+                InsertIntoPool(shared_pool.data(), shared_size, shared_cap,
                                SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
         }
 
