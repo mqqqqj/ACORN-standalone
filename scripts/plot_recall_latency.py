@@ -10,33 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-SELECTIVITY_ORDER = [
-    "0.1%",
-    "1%",
-    "5%",
-    "10%",
-    "20%",
-    "50%",
-    "80%",
-    "90%",
-    "95%",
-    "99%",
-    "99.9%",
-]
-
-FILE_SUFFIX = {
-    "0.1%": "s0p1",
-    "1%": "s1",
-    "5%": "s5",
-    "10%": "s10",
-    "20%": "s20",
-    "50%": "s50",
-    "80%": "s80",
-    "90%": "s90",
-    "95%": "s95",
-    "99%": "s99",
-    "99.9%": "s99p9",
-}
+SELECTIVITIES = ["0.1%", "1%", "5%", "10%", "20%", "50%", "80%"]
 
 
 def normalize_selectivity(value):
@@ -63,78 +37,85 @@ def read_tsv(path):
     return data
 
 
-def plot_one(selectivity, scatter_rows, iqan_rows, post_rows, out_dir):
-    fig, ax = plt.subplots(figsize=(7.2, 5.0), dpi=160)
-
-    for label, rows, color, marker in [
-        ("ScatterSearch", scatter_rows, "#1f77b4", "o"),
-        ("iQAN", iqan_rows, "#d62728", "s"),
-        ("Post-Filter", post_rows, "#2ca02c", "^"),
-    ]:
+def plot_panel(ax, title, series):
+    all_rows = []
+    for label, rows, color, marker in series:
         if not rows:
             continue
-        recall = [r["recall"] for r in rows]
-        latency = [r["avg_ms"] for r in rows]
+        all_rows.extend(rows)
         ax.plot(
-            recall,
-            latency,
+            [r["recall"] for r in rows],
+            [r["avg_ms"] for r in rows],
             marker=marker,
-            linewidth=2.0,
-            markersize=4.5,
+            linewidth=1.8,
+            markersize=4.0,
             color=color,
             label=label,
         )
-        for r in rows:
-            ax.annotate(
-                str(r["efs"]),
-                (r["recall"], r["avg_ms"]),
-                textcoords="offset points",
-                xytext=(4, 4),
-                fontsize=7,
-                color=color,
-            )
 
-    ax.set_title(f"LAION10M Recall-Latency, selectivity {selectivity}")
+    ax.set_title(title, fontsize=11)
     ax.set_xlabel("Recall@100")
     ax.set_ylabel("Latency (ms/query)")
-    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.45)
-    ax.legend(frameon=True)
+    ax.grid(True, linestyle="--", linewidth=0.55, alpha=0.45)
 
-    all_rows = scatter_rows + iqan_rows + post_rows
-    all_recalls = [r["recall"] for r in all_rows]
-    all_latency = [r["avg_ms"] for r in all_rows]
-    if all_recalls:
-        xmin, xmax = min(all_recalls), max(all_recalls)
-        pad = max(0.001, (xmax - xmin) * 0.08)
-        ax.set_xlim(max(0.0, xmin - pad), min(1.0, xmax + pad))
-    if all_latency:
-        ymin, ymax = min(all_latency), max(all_latency)
-        pad = max(0.05, (ymax - ymin) * 0.12)
-        ax.set_ylim(max(0.0, ymin - pad), ymax + pad)
+    if all_rows:
+        recalls = [r["recall"] for r in all_rows]
+        latency = [r["avg_ms"] for r in all_rows]
+        xmin, xmax = min(recalls), max(recalls)
+        ymin, ymax = min(latency), max(latency)
+        xpad = max(0.001, (xmax - xmin) * 0.08)
+        ypad = max(0.03, (ymax - ymin) * 0.12)
+        ax.set_xlim(max(0.0, xmin - xpad), min(1.0, xmax + xpad))
+        ax.set_ylim(max(0.0, ymin - ypad), ymax + ypad)
 
-    fig.tight_layout()
-    suffix = FILE_SUFFIX[selectivity]
-    png_path = os.path.join(out_dir, f"recall_latency_{suffix}.png")
-    pdf_path = os.path.join(out_dir, f"recall_latency_{suffix}.pdf")
+
+def plot_grid(title, scatter_data, iqan_data, out_prefix):
+    fig, axes = plt.subplots(3, 3, figsize=(14.5, 11.0), dpi=170)
+    axes = axes.flatten()
+
+    for i, selectivity in enumerate(SELECTIVITIES):
+        plot_panel(
+            axes[i],
+            f"Selectivity {selectivity}",
+            [
+                ("ScatterSearch", scatter_data[selectivity], "#1f77b4", "o"),
+                ("iQAN", iqan_data[selectivity], "#d62728", "s"),
+            ],
+        )
+
+    for ax in axes[len(SELECTIVITIES) :]:
+        ax.axis("off")
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=2, frameon=True)
+    fig.suptitle(title, fontsize=15, y=0.985)
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
+
+    png_path = f"{out_prefix}.png"
+    pdf_path = f"{out_prefix}.pdf"
     fig.savefig(png_path)
     fig.savefig(pdf_path)
     plt.close(fig)
-    return png_path, pdf_path
+    return [png_path, pdf_path]
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--scatter",
+        "--in-scatter",
         default="results/laion10m_binary_scatter_sweep_4t_nq1000.tsv",
     )
     parser.add_argument(
-        "--iqan",
+        "--in-iqan",
         default="results/laion10m_binary_iqan_sweep_4t_nq1000.tsv",
     )
     parser.add_argument(
-        "--post",
+        "--post-scatter",
         default="results/laion10m_binary_post_parallel_sweep_4t_nq1000.tsv",
+    )
+    parser.add_argument(
+        "--post-iqan",
+        default="results/laion10m_binary_post_iqan_sweep_4t_nq1000.tsv",
     )
     parser.add_argument(
         "--out-dir",
@@ -143,21 +124,29 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    scatter = read_tsv(args.scatter)
-    iqan = read_tsv(args.iqan)
-    post = read_tsv(args.post)
+
+    in_scatter = read_tsv(args.in_scatter)
+    in_iqan = read_tsv(args.in_iqan)
+    post_scatter = read_tsv(args.post_scatter)
+    post_iqan = read_tsv(args.post_iqan)
 
     written = []
-    for selectivity in SELECTIVITY_ORDER:
-        written.extend(
-            plot_one(
-                selectivity,
-                scatter[selectivity],
-                iqan[selectivity],
-                post[selectivity],
-                args.out_dir,
-            )
+    written.extend(
+        plot_grid(
+            "LAION10M In-Filter Recall-Latency",
+            in_scatter,
+            in_iqan,
+            os.path.join(args.out_dir, "in_filter_recall_latency"),
         )
+    )
+    written.extend(
+        plot_grid(
+            "LAION10M Post-Filter Recall-Latency",
+            post_scatter,
+            post_iqan,
+            os.path.join(args.out_dir, "post_filter_recall_latency"),
+        )
+    )
 
     print("Wrote:")
     for path in written:
