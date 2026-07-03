@@ -55,7 +55,7 @@ namespace acorn
     void set_filter_check_cost(int cost) { g_filter_check_cost = std::max(0, cost); }
     int get_filter_check_cost() { return g_filter_check_cost; }
 
-    static inline bool check_filter(const char *filter_map, int id)
+    bool check_filter(const char *filter_map, int id)
     {
         volatile int sink = 0;
         for (int i = 0; i < g_filter_check_cost; i++)

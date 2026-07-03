@@ -140,6 +140,7 @@ namespace acorn
     // Filter predicate wrapper. filter_check_cost controls synthetic per-check work.
     void set_filter_check_cost(int cost);
     int get_filter_check_cost();
+    bool check_filter(const char *filter_map, int id);
 
     // Phase timing for no_sync / scatter comparison
     struct PhaseTiming

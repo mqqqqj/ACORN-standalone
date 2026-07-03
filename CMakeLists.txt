@@ -41,3 +41,6 @@ target_link_libraries(compute_filtered_gt acorn)
 
 add_executable(search examples/search.cpp)
 target_link_libraries(search acorn)
+
+add_executable(profile_filter_distance_cost examples/profile_filter_distance_cost.cpp)
+target_link_libraries(profile_filter_distance_cost acorn)
