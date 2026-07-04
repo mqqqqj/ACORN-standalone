@@ -36,6 +36,9 @@ target_link_libraries(acorn PUBLIC OpenMP::OpenMP_CXX)
 add_executable(gen_labels examples/gen_labels.cpp)
 target_link_libraries(gen_labels acorn)
 
+add_executable(extract_range examples/extract_range.cpp)
+target_link_libraries(extract_range acorn)
+
 add_executable(compute_filtered_gt examples/compute_filtered_gt.cpp)
 target_link_libraries(compute_filtered_gt acorn)
 
@@ -44,3 +47,9 @@ target_link_libraries(search acorn)
 
 add_executable(profile_filter_distance_cost examples/profile_filter_distance_cost.cpp)
 target_link_libraries(profile_filter_distance_cost acorn)
+
+add_executable(profile_filter_lookup examples/profile_filter_lookup.cpp)
+target_link_libraries(profile_filter_lookup acorn)
+
+add_executable(run_adaptive_phase1 examples/run_adaptive_phase1.cpp)
+target_link_libraries(run_adaptive_phase1 acorn)

@@ -23,7 +23,7 @@ static void usage(const char *prog)
                  "Usage: %s [--iters N] [--dim D] [--max-cost C] [--step S]\n"
                  "          [--costs c1,c2,...] [--base base.fbin]\n"
                  "\n"
-                 "Defaults: --iters 10000000 --dim 512 --max-cost 512 --step 16\n"
+                 "Defaults: --iters 10000000 --dim 512 --max-cost 256 --step 32\n"
                  "If --base is set, distance cost uses random base ids to mimic graph search.\n",
                  prog);
     std::exit(1);
@@ -53,8 +53,8 @@ int main(int argc, char **argv)
 {
     int iters = 10000000;
     int dim = 512;
-    int max_cost = 512;
-    int step = 16;
+    int max_cost = 256;
+    int step = 32;
     const char *base_file = nullptr;
     std::vector<int> costs;
 
