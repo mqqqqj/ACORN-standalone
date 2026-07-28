@@ -129,19 +129,131 @@ static std::vector<int> generate_skewed(int n, std::mt19937 &rng)
     return labels;
 }
 
+static const double MIX_SELECTIVITY[] = {
+    0.001, 0.005, 0.01, 0.02, 0.05, 0.10, 0.15, 0.20, 0.464};
+static const int MIX_NUM_LABELS = sizeof(MIX_SELECTIVITY) / sizeof(MIX_SELECTIVITY[0]);
+
+static std::vector<int> generate_mix_base(int n, std::mt19937 &rng)
+{
+    std::vector<int> counts(MIX_NUM_LABELS);
+    int cum = 0;
+    for (int i = 0; i < MIX_NUM_LABELS - 1; i++)
+    {
+        counts[i] = (int)std::round(n * MIX_SELECTIVITY[i]);
+        cum += counts[i];
+    }
+    counts[MIX_NUM_LABELS - 1] = n - cum;
+
+    std::vector<int> labels(n);
+    int pos = 0;
+    for (int lbl = 0; lbl < MIX_NUM_LABELS; lbl++)
+    {
+        for (int j = 0; j < counts[lbl]; j++)
+            labels[pos++] = lbl + 1;
+    }
+    std::shuffle(labels.begin(), labels.end(), rng);
+    return labels;
+}
+
+static std::vector<int> generate_mix_query(int n, std::mt19937 &rng)
+{
+    // Middle selectivities dominate the mixed query workload.
+    const int weights[MIX_NUM_LABELS] = {40, 60, 80, 120, 220, 220, 170, 60, 30};
+    int weight_sum = 0;
+    for (int w : weights)
+        weight_sum += w;
+
+    std::vector<int> counts(MIX_NUM_LABELS);
+    int cum = 0;
+    for (int i = 0; i < MIX_NUM_LABELS - 1; i++)
+    {
+        counts[i] = (int)std::round((double)n * weights[i] / weight_sum);
+        cum += counts[i];
+    }
+    counts[MIX_NUM_LABELS - 1] = n - cum;
+
+    std::vector<int> labels(n);
+    int pos = 0;
+    for (int lbl = 0; lbl < MIX_NUM_LABELS; lbl++)
+    {
+        for (int j = 0; j < counts[lbl]; j++)
+            labels[pos++] = lbl + 1;
+    }
+    std::shuffle(labels.begin(), labels.end(), rng);
+    return labels;
+}
+
+static std::vector<int> generate_mix_query_less_low(int n, std::mt19937 &rng)
+{
+    // Reduce labels 1..4 from 30% to 20%; make 5%, 10%, and 15% dominate more strongly.
+    const int weights[MIX_NUM_LABELS] = {20, 40, 60, 80, 240, 240, 200, 90, 30};
+    int weight_sum = 0;
+    for (int w : weights)
+        weight_sum += w;
+
+    std::vector<int> counts(MIX_NUM_LABELS);
+    int cum = 0;
+    for (int i = 0; i < MIX_NUM_LABELS - 1; i++)
+    {
+        counts[i] = (int)std::round((double)n * weights[i] / weight_sum);
+        cum += counts[i];
+    }
+    counts[MIX_NUM_LABELS - 1] = n - cum;
+
+    std::vector<int> labels(n);
+    int pos = 0;
+    for (int lbl = 0; lbl < MIX_NUM_LABELS; lbl++)
+    {
+        for (int j = 0; j < counts[lbl]; j++)
+            labels[pos++] = lbl + 1;
+    }
+    std::shuffle(labels.begin(), labels.end(), rng);
+    return labels;
+}
+
+static std::vector<int> generate_mix_cost(int n, std::mt19937 &rng)
+{
+    // Lower predicate costs dominate the mixed query workload.
+    const int weights[] = {360, 260, 170, 110, 70, 30};
+    const int num_costs = sizeof(weights) / sizeof(weights[0]);
+    int weight_sum = 0;
+    for (int w : weights)
+        weight_sum += w;
+
+    std::vector<int> counts(num_costs);
+    int cum = 0;
+    for (int cost = 0; cost < num_costs - 1; cost++)
+    {
+        counts[cost] = (int)std::round((double)n * weights[cost] / weight_sum);
+        cum += counts[cost];
+    }
+    counts[num_costs - 1] = n - cum;
+
+    std::vector<int> labels(n);
+    int pos = 0;
+    for (int cost = 0; cost < num_costs; cost++)
+    {
+        for (int j = 0; j < counts[cost]; j++)
+            labels[pos++] = cost;
+    }
+    std::shuffle(labels.begin(), labels.end(), rng);
+    return labels;
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s --base <base.fbin> --output <labels.ibin> [options]\n"
+            "Usage: %s (--base <base.fbin> | --count <n>) --output <labels.ibin> [options]\n"
             "\n"
             "Generate label file in ibin format.\n"
             "\n"
             "Required:\n"
             "  --base <path>      Base vectors in fbin format (to get count)\n"
+            "  --count <n>        Generate exactly n labels without reading a base file\n"
             "  --output <path>    Output label file in ibin format\n"
             "\n"
             "Options:\n"
-            "  --dist <type>      Label distribution: uniform (default) | skewed\n"
+            "  --dist <type>      Label distribution: uniform (default) | skewed | mix | mix_query | mix_query_less_low | mix_cost\n"
             "  --selectivity <x>  Per-label fraction for uniform dist\n"
             "                     Accepts decimals or percentages, e.g. 0.001 or 0.1%%\n"
             "  --binary           Force binary labels: label 1 has the requested selectivity,\n"
@@ -156,7 +268,17 @@ static void usage(const char *prog)
             "  binary labels: label 1 has the requested selectivity, label 2 has the rest.\n"
             "\n"
             "Skewed distribution (6 labels):\n"
-            "  50%%, 25%%, 12.5%%, 6.25%%, 3.125%%, 3.125%%\n",
+            "  50%%, 25%%, 12.5%%, 6.25%%, 3.125%%, 3.125%%\n"
+            "\n"
+            "Mix base distribution (9 labels):\n"
+            "  label 1..9 = 0.1%%, 0.5%%, 1%%, 2%%, 5%%, 10%%, 15%%, 20%%, 46.4%%\n"
+            "\n"
+            "Mix query distribution (9 labels):\n"
+            "  label 1..9 query counts follow weights 40,60,80,120,220,220,170,60,30\n"
+            "  mix_query_less_low follows weights 20,40,60,80,240,240,200,90,30\n"
+            "\n"
+            "Mix cost distribution (costs 0..5):\n"
+            "  cost 0..5 query counts follow weights 360,260,170,110,70,30\n",
             prog);
     exit(1);
 }
@@ -169,12 +291,22 @@ int main(int argc, char *argv[])
     double selectivity = 0.1;
     bool force_binary = false;
     int constant_label = 0;
+    int count = 0;
     int seed = 42;
 
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "--base") == 0 && i + 1 < argc)
             base_file = argv[++i];
+        else if (strcmp(argv[i], "--count") == 0 && i + 1 < argc)
+        {
+            count = atoi(argv[++i]);
+            if (count <= 0)
+            {
+                fprintf(stderr, "Invalid count: %d\n", count);
+                usage(argv[0]);
+            }
+        }
         else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc)
             output_file = argv[++i];
         else if (strcmp(argv[i], "--dist") == 0 && i + 1 < argc)
@@ -209,17 +341,29 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (!base_file || !output_file)
+    if ((!base_file && count <= 0) || !output_file)
         usage(argv[0]);
-
-    printf("Reading base vector header to get count ...\n");
-    int n = 0, d = 0;
-    if (!read_fbin_header(base_file, &n, &d))
+    if (base_file && count > 0)
     {
-        fprintf(stderr, "Error: cannot read valid fbin header from %s\n", base_file);
-        return 1;
+        fprintf(stderr, "Use only one of --base or --count\n");
+        usage(argv[0]);
     }
-    printf("  n=%d, d=%d\n", n, d);
+
+    int n = count, d = 0;
+    if (base_file)
+    {
+        printf("Reading base vector header to get count ...\n");
+        if (!read_fbin_header(base_file, &n, &d))
+        {
+            fprintf(stderr, "Error: cannot read valid fbin header from %s\n", base_file);
+            return 1;
+        }
+        printf("  n=%d, d=%d\n", n, d);
+    }
+    else
+    {
+        printf("Using explicit count: n=%d\n", n);
+    }
 
     std::mt19937 rng(seed);
 
@@ -236,6 +380,30 @@ int main(int argc, char *argv[])
         printf("Generating skewed labels (50%%, 25%%, 12.5%%, 6.25%%, 3.125%%, 3.125%%) ...\n");
         labels = generate_skewed(n, rng);
         max_lbl = 6;
+    }
+    else if (strcmp(dist_type, "mix") == 0)
+    {
+        printf("Generating mix base labels (0.1%%, 0.5%%, 1%%, 2%%, 5%%, 10%%, 15%%, 20%%, 46.4%%) ...\n");
+        labels = generate_mix_base(n, rng);
+        max_lbl = MIX_NUM_LABELS;
+    }
+    else if (strcmp(dist_type, "mix_query") == 0)
+    {
+        printf("Generating mix query labels with low-selectivity-heavy weights ...\n");
+        labels = generate_mix_query(n, rng);
+        max_lbl = MIX_NUM_LABELS;
+    }
+    else if (strcmp(dist_type, "mix_query_less_low") == 0)
+    {
+        printf("Generating mix query labels with lower low-selectivity weights ...\n");
+        labels = generate_mix_query_less_low(n, rng);
+        max_lbl = MIX_NUM_LABELS;
+    }
+    else if (strcmp(dist_type, "mix_cost") == 0)
+    {
+        printf("Generating mix query costs with low-cost-heavy weights ...\n");
+        labels = generate_mix_cost(n, rng);
+        max_lbl = 5;
     }
     else
     {
@@ -255,11 +423,12 @@ int main(int argc, char *argv[])
     }
 
     // Print distribution
+    int min_lbl = strcmp(dist_type, "mix_cost") == 0 ? 0 : 1;
     std::vector<int> count_vec(max_lbl + 1, 0);
     for (int i = 0; i < n; i++)
         count_vec[labels[i]]++;
-    printf("Label distribution:\n");
-    for (int lbl = 1; lbl <= max_lbl; lbl++)
+    printf("%s distribution:\n", strcmp(dist_type, "mix_cost") == 0 ? "Cost" : "Label");
+    for (int lbl = min_lbl; lbl <= max_lbl; lbl++)
         printf("  %2d: %d (%.2f%%)\n", lbl, count_vec[lbl], 100.0 * count_vec[lbl] / n);
 
     FILE *fp = fopen(output_file, "wb");

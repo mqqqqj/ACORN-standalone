@@ -125,7 +125,7 @@ int main(int argc, char *argv[])
     printf("  %zu labels\n", bl.size());
 
     printf("Loading query labels: %s\n", query_labels);
-    std::vector<int> ql = acorn::read_ibin(query_labels, nq_total);
+    std::vector<int> ql = acorn::read_ibin(query_labels, nq_all);
     printf("  %zu labels\n", ql.size());
 
     // Pre-index by label

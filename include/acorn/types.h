@@ -40,8 +40,9 @@ namespace acorn
         float distance;
         bool expanded;
 
+        // True means this candidate has already been expanded.
         SearchNeighbor() : id(-1), distance(0), expanded(false) {}
-        SearchNeighbor(int id, float dist, bool exp = true)
+        SearchNeighbor(int id, float dist, bool exp = false)
             : id(id), distance(dist), expanded(exp) {}
 
         bool operator<(const SearchNeighbor &o) const { return distance < o.distance; }

@@ -53,3 +53,6 @@ target_link_libraries(profile_filter_lookup acorn)
 
 add_executable(run_adaptive_phase1 examples/run_adaptive_phase1.cpp)
 target_link_libraries(run_adaptive_phase1 acorn)
+
+add_executable(run_adaptive_selector examples/run_adaptive_selector.cpp)
+target_link_libraries(run_adaptive_selector acorn)

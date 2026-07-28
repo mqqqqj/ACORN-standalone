@@ -86,7 +86,7 @@ static void usage(const char *prog)
             "  --efs-max <int>    Max efs for *_sweep modes\n"
             "  --efs-step <int>   efs step for *_sweep modes\n"
             "  --filter-cost <n>  Synthetic work per filter check (default: 0)\n"
-            "  --mode <name>      Search mode: all|serial|pre|post|pre_parallel|post_parallel|post_parallel_iqan|iqan|nosync|scatter|scatter_sweep|iqan_sweep|post_parallel_sweep|post_parallel_iqan_sweep (default: all)\n"
+            "  --mode <name>      Search mode: all|serial|serial_sweep|pre|post|post_sweep|pre_parallel|post_parallel|post_parallel_iqan|iqan|nosync|scatter|scatter_sweep|iqan_sweep|post_parallel_sweep|post_parallel_iqan_sweep (default: all)\n"
             "  --nq <int>         Max queries to run (default: all)\n"
             "\n"
             "Example:\n"
@@ -163,10 +163,13 @@ int main(int argc, char *argv[])
     acorn::set_filter_check_cost(filter_check_cost);
 
     bool run_serial = strcmp(mode, "all") == 0 || strcmp(mode, "serial") == 0;
+    bool run_serial_sweep = strcmp(mode, "serial_sweep") == 0;
     bool run_pre = strcmp(mode, "all") == 0 || strcmp(mode, "pre") == 0 ||
                    strcmp(mode, "prefilter") == 0;
     bool run_post = strcmp(mode, "all") == 0 || strcmp(mode, "post") == 0 ||
                     strcmp(mode, "postfilter") == 0;
+    bool run_post_sweep = strcmp(mode, "post_sweep") == 0 ||
+                          strcmp(mode, "postfilter_sweep") == 0;
     bool run_pre_parallel = strcmp(mode, "all") == 0 || strcmp(mode, "pre_parallel") == 0 ||
                             strcmp(mode, "parallel_pre") == 0;
     bool run_post_parallel = strcmp(mode, "all") == 0 || strcmp(mode, "post_parallel") == 0 ||
@@ -183,7 +186,8 @@ int main(int argc, char *argv[])
                                    strcmp(mode, "parallel_post_sweep") == 0;
     bool run_post_parallel_iqan_sweep = strcmp(mode, "post_parallel_iqan_sweep") == 0 ||
                                         strcmp(mode, "parallel_post_iqan_sweep") == 0;
-    if (!run_serial && !run_pre && !run_post && !run_pre_parallel && !run_post_parallel &&
+    if (!run_serial && !run_serial_sweep && !run_pre && !run_post && !run_post_sweep &&
+        !run_pre_parallel && !run_post_parallel &&
         !run_post_parallel_iqan &&
         !run_iqan && !run_nosync && !run_scatter && !run_scatter_sweep && !run_iqan_sweep &&
         !run_post_parallel_sweep && !run_post_parallel_iqan_sweep)
@@ -191,7 +195,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Unknown mode: %s\n", mode);
         usage(argv[0]);
     }
-    if (run_scatter_sweep || run_iqan_sweep || run_post_parallel_sweep || run_post_parallel_iqan_sweep)
+    if (run_serial_sweep || run_post_sweep ||
+        run_scatter_sweep || run_iqan_sweep || run_post_parallel_sweep || run_post_parallel_iqan_sweep)
     {
         if (efs_min <= 0)
             efs_min = efs;
@@ -287,6 +292,61 @@ int main(int argc, char *argv[])
                      search_k, ef, tmp_labels.data(), tmp_dist.data(), wf.data());
     }
     printf("  Done.\n");
+
+    if (run_serial_sweep || run_post_sweep)
+    {
+        const char *sweep_mode = run_serial_sweep ? "serial" : "post";
+        printf("\n--- %s Sweep (%d queries, ef=%d..%d step=%d) ---\n",
+               run_serial_sweep ? "Serial In-Filter" : "Post-Filter",
+               num_queries, efs_min, efs_max, efs_step);
+        for (int cur_ef = efs_min; cur_ef <= efs_max; cur_ef += efs_step)
+        {
+            std::vector<int> sweep_labels(search_k * num_queries, -1);
+            std::vector<float> sweep_dist(search_k * num_queries);
+            double sweep_time = 0;
+
+            acorn::reset_ser_ndis();
+            for (int i = 0; i < num_queries; i++)
+            {
+                const float *q = queries.data() + i * qd;
+                int *lbl = sweep_labels.data() + i * search_k;
+                float *dst = sweep_dist.data() + i * search_k;
+
+                int ql = query_labels[i];
+                std::vector<char> wf(index.ntotal, 0);
+                for (int id : label_to_ids[ql])
+                    wf[id] = 1;
+
+                double tq = -get_ms();
+                if (run_serial_sweep)
+                {
+                    index.search(q, index.get_xb(), index.d, metric,
+                                 search_k, cur_ef, lbl, dst, wf.data());
+                }
+                else
+                {
+                    index.post_filter_search(q, index.get_xb(), index.d, metric,
+                                             search_k, cur_ef, lbl, dst, wf.data());
+                }
+                sweep_time += tq + get_ms();
+            }
+
+            double recall = -1.0;
+            if (gt_file)
+                recall = compute_recall(num_queries, search_k, gt_k, gt_ids, sweep_labels);
+
+            int ok, empty, wrong;
+            check_result_filter(num_queries, search_k, sweep_labels, query_labels, base_labels,
+                                &ok, &empty, &wrong);
+
+            size_t ndis_total = acorn::get_ser_ndis();
+            printf("SWEEP_RESULT mode=%s efs=%d time_ms=%.1f avg_ms=%.3f recall=%.4f ndc=%zu ok=%d empty=%d wrong=%d\n",
+                   sweep_mode, cur_ef, sweep_time, sweep_time / num_queries, recall,
+                   ndis_total, ok, empty, wrong);
+            fflush(stdout);
+        }
+        return 0;
+    }
 
     if (run_scatter_sweep || run_iqan_sweep || run_post_parallel_sweep || run_post_parallel_iqan_sweep)
     {

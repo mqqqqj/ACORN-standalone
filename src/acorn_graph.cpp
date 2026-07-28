@@ -47,6 +47,7 @@ namespace acorn
     static std::vector<size_t> g_thread_ndis_total;
     static size_t g_ser_ndis = 0;
     static int g_filter_check_cost = 0;
+    static int g_filtered_expand_target = 0;
 
     void reset_thread_ndis(int nt) { g_thread_ndis_total.assign(nt, 0); }
     const std::vector<size_t> &get_thread_ndis() { return g_thread_ndis_total; }
@@ -54,6 +55,8 @@ namespace acorn
     size_t get_ser_ndis() { return g_ser_ndis; }
     void set_filter_check_cost(int cost) { g_filter_check_cost = std::max(0, cost); }
     int get_filter_check_cost() { return g_filter_check_cost; }
+    void set_filtered_expand_target(int target) { g_filtered_expand_target = std::max(0, target); }
+    int get_filtered_expand_target() { return g_filtered_expand_target; }
 
     bool check_filter(const char *filter_map, int id)
     {
@@ -200,15 +203,18 @@ namespace acorn
         DistFn &&comp_dist,
         size_t *ndis_local = nullptr)
     {
-        if (!pool[cur].expanded)
+        if (pool[cur].expanded)
             return pool_size;
 
-        pool[cur].expanded = false;
+        pool[cur].expanded = true;
         int next_cur = pool_size;
         size_t begin, end;
         hnsw.neighbor_range(pool[cur].id, 0, &begin, &end);
 
         int num_found = 0;
+        int target_found = (g_filtered_expand_target > 0)
+                               ? g_filtered_expand_target
+                               : std::max(1, hnsw.M * 2);
         bool keep_expanding = true;
         int neighbor_idx = 0;
 
@@ -229,11 +235,11 @@ namespace acorn
                 if (pool_size < L || dv < pool[L - 1].distance)
                 {
                     int r = InsertIntoPool(pool, pool_size, L,
-                                           SearchNeighbor(v1, dv, true));
+                                           SearchNeighbor(v1, dv, false));
                     if (r < next_cur)
                         next_cur = r;
                 }
-                if (num_found >= hnsw.M * 2)
+                if (num_found >= target_found)
                 {
                     keep_expanding = false;
                     break;
@@ -263,11 +269,11 @@ namespace acorn
                     if (pool_size < L || d2 < pool[L - 1].distance)
                     {
                         int r = InsertIntoPool(pool, pool_size, L,
-                                               SearchNeighbor(v2, d2, true));
+                                               SearchNeighbor(v2, d2, false));
                         if (r < next_cur)
                             next_cur = r;
                     }
-                    if (num_found >= hnsw.M * 2)
+                    if (num_found >= target_found)
                     {
                         keep_expanding = false;
                         break;
@@ -291,10 +297,10 @@ namespace acorn
         DistFn &&comp_dist,
         size_t *ndis_local = nullptr)
     {
-        if (!pool[cur].expanded)
+        if (pool[cur].expanded)
             return pool_size;
 
-        pool[cur].expanded = false;
+        pool[cur].expanded = true;
         int next_cur = pool_size;
         size_t begin, end;
         hnsw.neighbor_range(pool[cur].id, 0, &begin, &end);
@@ -320,7 +326,7 @@ namespace acorn
             {
                 num_found++;
                 int r = InsertIntoPool(pool, pool_size, L,
-                                       SearchNeighbor(v1, dv, true));
+                                       SearchNeighbor(v1, dv, false));
                 if (r < next_cur)
                     next_cur = r;
                 if (num_found >= hnsw.M * 2)
@@ -352,7 +358,7 @@ namespace acorn
                         continue;
                     num_found++;
                     int r = InsertIntoPool(pool, pool_size, L,
-                                           SearchNeighbor(v2, d2, true));
+                                           SearchNeighbor(v2, d2, false));
                     if (r < next_cur)
                         next_cur = r;
                     if (num_found >= hnsw.M * 2)
@@ -378,10 +384,10 @@ namespace acorn
         DistFn &&comp_dist,
         size_t *ndis_local = nullptr)
     {
-        if (!pool[cur].expanded)
+        if (pool[cur].expanded)
             return pool_size;
 
-        pool[cur].expanded = false;
+        pool[cur].expanded = true;
         int next_cur = pool_size;
         size_t begin, end;
         hnsw.neighbor_range(pool[cur].id, 0, &begin, &end);
@@ -402,11 +408,11 @@ namespace acorn
             if (pool_size < L || dv < pool[L - 1].distance)
             {
                 int r = InsertIntoPool(pool, pool_size, L,
-                                       SearchNeighbor(v, dv, true));
+                                       SearchNeighbor(v, dv, false));
                 if (r < next_cur)
                     next_cur = r;
             }
-            if (++num_found >= hnsw.M * 2)
+            if (++num_found >= hnsw.M)
                 break;
         }
 
@@ -452,7 +458,7 @@ namespace acorn
         // Phase 2: init pool with nearest and its level-0 neighbors
         visited[nearest] = true;
         if (check_filter(filter_map, nearest))
-            InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(nearest, d_nearest, true));
+            InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(nearest, d_nearest, false));
 
         size_t begin, end;
         neighbor_range(nearest, 0, &begin, &end);
@@ -467,7 +473,7 @@ namespace acorn
                 continue;
             visited[v] = true;
             float dv = comp_dist(v);
-            InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(v, dv, true));
+            InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(v, dv, false));
         }
 
         int cur = 0;
@@ -520,7 +526,7 @@ namespace acorn
             greedy_update_unfiltered(*this, lvl, nearest, d_nearest, comp_dist);
 
         visited[nearest] = true;
-        InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(nearest, d_nearest, true));
+        InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(nearest, d_nearest, false));
 
         size_t begin, end;
         neighbor_range(nearest, 0, &begin, &end);
@@ -533,7 +539,7 @@ namespace acorn
                 continue;
             visited[v] = true;
             float dv = comp_dist(v);
-            InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(v, dv, true));
+            InsertIntoPool(pool.data(), pool_size, L, SearchNeighbor(v, dv, false));
         }
 
         int cur = 0;
@@ -792,13 +798,6 @@ namespace acorn
             InsertIntoPool(shared_pool.data(), shared_size, L,
                            SearchNeighbor(nearest, d_nearest, false));
 
-        std::vector<std::pair<float, int>> batch;
-        // Add nearest to batch so it gets expanded in round 1
-        // (needed when nearest has no filtered direct neighbors at level 0,
-        //  but 2-hop expansion via ACORN hybrid logic can reach them)
-        if (check_filter(filter_map, nearest))
-            batch.emplace_back(d_nearest, nearest);
-
         size_t begin, end;
         neighbor_range(nearest, 0, &begin, &end);
         for (size_t j = begin; j < end; j++)
@@ -812,17 +811,30 @@ namespace acorn
                 continue;
             visited[v] = true;
             float dv = comp_dist(v);
-            batch.emplace_back(dv, v);
             InsertIntoPool(shared_pool.data(), shared_size, L,
                            SearchNeighbor(v, dv, false));
         }
 
+        auto refill_batch_from_shared_pool = [&]()
+        {
+            std::vector<std::pair<float, int>> next_batch;
+            int batch_cap = num_threads * L;
+            for (int i = 0; i < shared_size && (int)next_batch.size() < batch_cap; i++)
+            {
+                if (shared_pool[i].expanded)
+                    continue;
+                next_batch.emplace_back(shared_pool[i].distance, shared_pool[i].id);
+                shared_pool[i].expanded = true;
+            }
+            return next_batch;
+        };
+
         // Phase 3: parallel rounds
         std::vector<size_t> thread_ndis(num_threads, 0);
+        std::vector<std::pair<float, int>> batch = refill_batch_from_shared_pool();
         while (!batch.empty())
         {
-            int to_process = std::min(num_threads * L, (int)batch.size());
-            std::vector<std::vector<std::pair<float, int>>> thread_unexpanded(num_threads);
+            int to_process = (int)batch.size();
             std::vector<std::vector<std::pair<float, int>>> thread_work(num_threads);
             for (int i = 0; i < to_process; i++)
                 thread_work[i % num_threads].push_back(batch[i]);
@@ -838,7 +850,7 @@ namespace acorn
                     if (!check_filter(filter_map, p.second))
                         continue;
                     InsertIntoPool(local_pool.data(), local_size, L,
-                                   SearchNeighbor(p.second, p.first, true));
+                                   SearchNeighbor(p.second, p.first, false));
                 }
 
                 int cur = 0, step = 0;
@@ -848,7 +860,7 @@ namespace acorn
                     int next_cur = expand_level0_filtered(
                         *this, cur, local_pool.data(), local_size, L, visited, filter_map,
                         comp_dist, &ndis_local);
-                    if (was_expanded)
+                    if (!was_expanded)
                         step++;
                     if (next_cur <= cur)
                         cur = next_cur;
@@ -856,48 +868,14 @@ namespace acorn
                         cur++;
                 }
 
-                thread_unexpanded[tid].clear();
-                for (int i = 0; i < local_size; i++)
-                    if (local_pool[i].expanded)
-                        thread_unexpanded[tid].emplace_back(local_pool[i].distance, local_pool[i].id);
-                thread_ndis[tid] = ndis_local;
+                thread_ndis[tid] += ndis_local;
 
 #pragma omp critical
                 for (int i = 0; i < local_size; i++)
-                    InsertIntoPool(shared_pool.data(), shared_size, L,
-                                   SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
+                    InsertIntoPool(shared_pool.data(), shared_size, L, local_pool[i]);
             }
 
-            batch.erase(batch.begin(), batch.begin() + to_process);
-            std::vector<std::pair<float, int>> all_unexpanded;
-            for (int t = 0; t < num_threads; t++)
-                for (auto &p : thread_unexpanded[t])
-                    if (check_filter(filter_map, p.second))
-                        all_unexpanded.push_back(p);
-
-            if (!all_unexpanded.empty())
-            {
-                if ((int)all_unexpanded.size() > L)
-                {
-                    std::nth_element(all_unexpanded.begin(),
-                                     all_unexpanded.begin() + L, all_unexpanded.end());
-                    all_unexpanded.resize(L);
-                }
-                for (auto &p : all_unexpanded)
-                    batch.push_back(p);
-            }
-
-            if (shared_size >= k && !batch.empty())
-            {
-                float min_d = batch[0].first;
-                for (auto &p : batch)
-                {
-                    if (p.first < min_d)
-                        min_d = p.first;
-                }
-                if (min_d > shared_pool[shared_size - 1].distance)
-                    batch.clear();
-            }
+            batch = refill_batch_from_shared_pool();
         }
 
         // Accumulate per-thread NDC for profiling
@@ -943,8 +921,6 @@ namespace acorn
         std::vector<bool> visited(ntotal, false);
         visited[nearest] = true;
 
-        std::vector<std::pair<float, int>> batch;
-        batch.emplace_back(d_nearest, nearest);
         InsertIntoPool(shared_pool.data(), shared_size, shared_cap,
                        SearchNeighbor(nearest, d_nearest, false));
 
@@ -959,18 +935,31 @@ namespace acorn
                 continue;
             visited[v] = true;
             float dv = comp_dist(v);
-            batch.emplace_back(dv, v);
             InsertIntoPool(shared_pool.data(), shared_size, shared_cap,
                            SearchNeighbor(v, dv, false));
         }
 
+        auto refill_batch_from_shared_pool = [&]()
+        {
+            std::vector<std::pair<float, int>> next_batch;
+            int batch_cap = num_threads * L;
+            for (int i = 0; i < shared_size && (int)next_batch.size() < batch_cap; i++)
+            {
+                if (shared_pool[i].expanded)
+                    continue;
+                next_batch.emplace_back(shared_pool[i].distance, shared_pool[i].id);
+                shared_pool[i].expanded = true;
+            }
+            return next_batch;
+        };
+
         std::vector<size_t> thread_ndis(num_threads, 0);
         double t1 = omp_get_wtime();
 
+        std::vector<std::pair<float, int>> batch = refill_batch_from_shared_pool();
         while (!batch.empty())
         {
-            int to_process = std::min(num_threads * L, (int)batch.size());
-            std::vector<std::vector<std::pair<float, int>>> thread_unexpanded(num_threads);
+            int to_process = (int)batch.size();
             std::vector<std::vector<std::pair<float, int>>> thread_work(num_threads);
             for (int i = 0; i < to_process; i++)
                 thread_work[i % num_threads].push_back(batch[i]);
@@ -984,7 +973,7 @@ namespace acorn
                 for (auto &p : thread_work[tid])
                 {
                     InsertIntoPool(local_pool.data(), local_size, L,
-                                   SearchNeighbor(p.second, p.first, true));
+                                   SearchNeighbor(p.second, p.first, false));
                 }
 
                 int cur = 0, step = 0;
@@ -994,7 +983,7 @@ namespace acorn
                     int next_cur = expand_level0_unfiltered(
                         *this, cur, local_pool.data(), local_size, L, visited,
                         comp_dist, &ndis_local);
-                    if (was_expanded)
+                    if (!was_expanded)
                         step++;
                     if (next_cur <= cur)
                         cur = next_cur;
@@ -1002,45 +991,14 @@ namespace acorn
                         cur++;
                 }
 
-                thread_unexpanded[tid].clear();
-                for (int i = 0; i < local_size; i++)
-                    if (local_pool[i].expanded)
-                        thread_unexpanded[tid].emplace_back(local_pool[i].distance, local_pool[i].id);
                 thread_ndis[tid] += ndis_local;
 
 #pragma omp critical
                 for (int i = 0; i < local_size; i++)
-                    InsertIntoPool(shared_pool.data(), shared_size, shared_cap,
-                                   SearchNeighbor(local_pool[i].id, local_pool[i].distance, false));
+                    InsertIntoPool(shared_pool.data(), shared_size, shared_cap, local_pool[i]);
             }
 
-            batch.erase(batch.begin(), batch.begin() + to_process);
-            std::vector<std::pair<float, int>> all_unexpanded;
-            for (int t = 0; t < num_threads; t++)
-                for (auto &p : thread_unexpanded[t])
-                    all_unexpanded.push_back(p);
-
-            if (!all_unexpanded.empty())
-            {
-                if ((int)all_unexpanded.size() > L)
-                {
-                    std::nth_element(all_unexpanded.begin(),
-                                     all_unexpanded.begin() + L, all_unexpanded.end());
-                    all_unexpanded.resize(L);
-                }
-                for (auto &p : all_unexpanded)
-                    batch.push_back(p);
-            }
-
-            if (shared_size >= shared_cap && !batch.empty())
-            {
-                float min_d = batch[0].first;
-                for (auto &p : batch)
-                    if (p.first < min_d)
-                        min_d = p.first;
-                if (min_d > shared_pool[shared_size - 1].distance)
-                    batch.clear();
-            }
+            batch = refill_batch_from_shared_pool();
         }
 
         double t2 = omp_get_wtime();
@@ -1144,7 +1102,7 @@ namespace acorn
                 if (!check_filter(filter_map, p.second))
                     continue;
                 InsertIntoPool(local_pool.data(), local_size, L,
-                               SearchNeighbor(p.second, p.first, true));
+                               SearchNeighbor(p.second, p.first, false));
             }
 
             // Search until queue is fully exhausted
@@ -1278,7 +1236,7 @@ namespace acorn
             for (auto &ep : thread_entry_points[tid])
             {
                 InsertIntoPool(local_pool.data(), local_size, L,
-                               SearchNeighbor(ep.second, ep.first, true));
+                               SearchNeighbor(ep.second, ep.first, false));
             }
 
             while (cur < local_size)
@@ -1318,7 +1276,7 @@ namespace acorn
                 int next_cur = expand_level0_filtered(
                     *this, cur, local_pool.data(), local_size, L, visited, filter_map,
                     comp_dist, &ndis_local);
-                if (was_expanded)
+                if (!was_expanded)
                     hop++;
                 if (next_cur <= cur)
                     cur = next_cur;
@@ -1435,7 +1393,7 @@ namespace acorn
             for (auto &ep : thread_entry_points[tid])
             {
                 InsertIntoPool(local_pool.data(), local_size, L,
-                               SearchNeighbor(ep.second, ep.first, true));
+                               SearchNeighbor(ep.second, ep.first, false));
             }
 
             while (cur < local_size)
@@ -1476,7 +1434,7 @@ namespace acorn
                 int next_cur = expand_level0_unfiltered(
                     *this, cur, local_pool.data(), local_size, L, visited,
                     comp_dist, &ndis_local);
-                if (was_expanded)
+                if (!was_expanded)
                     hop++;
                 if (next_cur <= cur)
                     cur = next_cur;
